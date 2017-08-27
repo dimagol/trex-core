@@ -1,0 +1,31 @@
+- duration : 1.0
+  src_ipv6 : [0x2002,0x0000,0x0000,0x0000,0x0000,0x0002]
+  dst_ipv6 : [0x1001,0x0000,0x0000,0x0000,0x0000,0x0002]
+  generator :
+          distribution : "seq"
+          clients_start : "16.0.0.1"
+          clients_end   : "16.0.0.255"
+          servers_start : "48.0.0.1"
+          servers_end   : "48.0.0.255"
+          clients_per_gb : 201 
+          min_clients    : 101 
+          dual_port_mask : "1.0.0.0"
+          tcp_aging      : 1
+          udp_aging      : 1
+  #cap_ipg    : true
+  cap_info :
+     - name: avl/delay_10_http_browsing_0.pcap
+       cps : 10 # 2.776
+       ipg : 10000
+       rtt : 10000
+
+       gtp_enabled : true
+       gtp_clients : 3 # per eNB
+       gtp_servers : 1 # per sGW 
+       gtp_inner_server_ip_start_6 : [0x2222,0x0000,0x0000,0x0000,0x0000,0x0001]
+       gtp_inner_client_ip_start_6 : [0x1111,0x0000,0x0000,0x0000,0x0000,0x0001]
+       gtp_inner_client_ip_start : 255.255.255.1
+       gtp_inner_server_ip_start : 128.128.128.1
+       gtp_server_tid_start : 1 
+       gtp_client_tid_start : 1 
+       w   : 1 

@@ -27,6 +27,7 @@ limitations under the License.
 #include "trex_watchdog.h"
 #include "utl_ipg_bucket.h"
 #include "stt_cp.h"
+#include "gtp/GtpTunnulizer.h"
 #include <common/utl_gcc_diag.h>
 
 #include <common/basic_utils.h>
@@ -969,6 +970,9 @@ void CPacketIndication::Clone(CPacketIndication * obj,CCapPktRaw * pkt){
     m_ip_offset      = obj->m_ip_offset;
     m_udp_tcp_offset = obj->m_udp_tcp_offset;;
     m_payload_offset = obj->m_payload_offset;
+    m_is_gtp = obj->m_is_gtp;
+    m_gtp_header_offset = obj->m_gtp_header_offset;
+
     UpdateMbufSize();
 }
 
@@ -2518,6 +2522,227 @@ enum CCapFileFlowInfo::load_cap_file_err CCapFileFlowInfo::load_cap_file(std::st
     return kOK;
 }
 
+enum CCapFileFlowInfo::load_cap_file_err
+CCapFileFlowInfo::load_cap_file_tunnelize_gtp(std::string cap_file,
+                                              uint16_t _id,
+                                              uint8_t plugin_id,
+                                              uint32_t gtp_client_ip,
+                                              uint32_t gtp_server_ip,
+                                              std::vector     <uint16_t> gtp_inner_client_ip_start_v6,
+                                              std::vector     <uint16_t> gtp_inner_server_ip_start_v6) {
+
+    RemoveAll();
+    GtpTunnulizer gtpTunnulizer;
+    if (gtp_inner_server_ip_start_v6.size() != 0){
+        uint16_t arr_gtp_inner_client_ip_start_v6[6];
+        uint16_t arr_gtp_inner_server_ip_start_v6[6];
+        for (int i = 0 ; i < 6 ; i++){
+            arr_gtp_inner_client_ip_start_v6[i] =  gtp_inner_client_ip_start_v6[i];
+            arr_gtp_inner_server_ip_start_v6[i] = gtp_inner_server_ip_start_v6[i];
+        }
+        gtpTunnulizer.init_flow_args_ipv6(arr_gtp_inner_client_ip_start_v6,
+                                          gtp_client_ip,
+                                          0,arr_gtp_inner_server_ip_start_v6,
+                                          gtp_server_ip,
+                                          0);
+    } else{
+        gtpTunnulizer.init_flow_args(gtp_client_ip, 0,gtp_server_ip, 0);
+    }
+
+    fprintf(stdout," -- loading cap file %s \n",cap_file.c_str());
+    CPacketParser parser;
+    CPacketIndication pkt_indication;
+    CCapReaderBase * lp=CCapReaderFactory::CreateReader((char *)cap_file.c_str(),0);
+
+    if (lp == 0) {
+        printf(" ERROR file %s does not exist or not supported \n",(char *)cap_file.c_str());
+        return kFileNotExist;
+    }
+    bool multi_flow_enable = plugin_id != 0;
+
+
+    CFlowTableMap flow;
+
+    parser.Create();
+    flow.Create(0);
+    m_total_bytes=0;
+    m_total_flows=0;
+    m_total_errors=0;
+    CFlow * first_flow= 0 ;
+    bool first_flow_fif_is_swap=false;
+    bool time_was_set=false;
+    double last_time=0.0;
+    CCapPktRaw raw_packet;
+    int cnt=0;
+    while ( true ) {
+        /* read packet */
+        if ( lp->ReadPacket(&raw_packet) ==false ){
+            break;
+        }
+
+
+        cnt++;
+        if ( !time_was_set ){
+            last_time=raw_packet.get_time();
+            time_was_set=true;
+        }else{
+            if (raw_packet.get_time()<last_time) {
+                fprintf(stderr, "Error: Non valid pcap file. Timestamp is negative at packet %d\n", cnt);
+                return kNegTimestamp;
+            }
+            last_time=raw_packet.get_time();
+        }
+
+        if ( parser.ProcessPacket(&pkt_indication, &raw_packet) ){
+            if (gtpTunnulizer.tunnulize_next_packet(raw_packet) &&
+                    pkt_indication.m_desc.IsValidPkt() ) {
+                pkt_indication.m_desc.SetIsUdp(true);
+                pkt_indication.m_is_gtp = true;
+                pkt_indication.m_gtp_header_offset = gtpTunnulizer.get_last_packet_gtp_header_offset();
+                pkt_indication.m_desc.SetPluginEnable(multi_flow_enable);
+                pkt_indication.m_desc.SetPluginId(plugin_id);
+
+                pkt_indication.m_desc.SetId(_id);
+                bool is_fif;
+                CFlow * lpflow = flow.process(pkt_indication.m_flow_key,is_fif);
+                m_total_bytes += (pkt_indication.m_packet->pkt_len+4); /* L2 include CRC*/
+                pkt_indication.m_cap_ipg = raw_packet.get_time();
+
+                pkt_indication.m_flow =lpflow;
+                pkt_indication.m_desc.SetFlowPktNum(lpflow->pkt_id);
+                /* inc pkt_id inside the flow */
+                lpflow->pkt_id++;
+
+                /* check that we don't have reserved TTL */
+                uint8_t ttl = pkt_indication.getTTL();
+                if ( ttl > 128) {
+                    pkt_indication.setTTL(128);
+                }
+
+                pkt_indication.clearTOSReserve();
+
+
+                // Validation for first packet in flow
+                if (is_fif) {
+                    lpflow->flow_id = m_total_flows;
+                    pkt_indication.m_desc.SetFlowId(lpflow->flow_id);
+
+                    if (m_total_flows == 0) {
+                        /* first flow */
+                        first_flow =lpflow;/* save it for single flow support , to signal error */
+                        lpflow->is_fif_swap =pkt_indication.m_desc.IsSwapTuple();
+                        first_flow_fif_is_swap = pkt_indication.m_desc.IsSwapTuple();
+                        pkt_indication.m_desc.SetInitSide(true);
+                        gtpTunnulizer.set_last_packet_direction(GtpTunnulizer::Direction::UP_DIR);
+                        Append(&pkt_indication);
+                        m_total_flows++;
+                    } else {
+                        if ( multi_flow_enable ) {
+                            lpflow->is_fif_swap = pkt_indication.m_desc.IsSwapTuple();
+                            /* in respect to the first flow */
+                            bool init_side_in_repect_to_first_flow =
+                                    ((first_flow_fif_is_swap?true:false) == lpflow->is_fif_swap)?true:false;
+                            pkt_indication.m_desc.SetInitSide(init_side_in_repect_to_first_flow);
+                            if (init_side_in_repect_to_first_flow){
+                                gtpTunnulizer.set_last_packet_direction(GtpTunnulizer::Direction::UP_DIR);
+                            } else{
+                                gtpTunnulizer.set_last_packet_direction(GtpTunnulizer::Direction::DOWN_DIR);
+                            }
+                            Append(&pkt_indication);
+                            m_total_flows++;
+                        } else {
+                            printf("More than one flow in this cap. Ignoring it !! \n");
+                            pkt_indication.m_flow_key.Dump(stderr);
+                            m_total_errors++;
+                        }
+                    }
+                }else{ /* no FIF */
+                    pkt_indication.m_desc.SetFlowId(lpflow->flow_id);
+
+                    if ( multi_flow_enable ==false ){
+                        if (lpflow == first_flow) {
+                            // add to
+                            bool init_side=
+                                    ((lpflow->is_fif_swap?true:false) == pkt_indication.m_desc.IsSwapTuple())?true:false;
+                            if (init_side){
+                                gtpTunnulizer.set_last_packet_direction(GtpTunnulizer::Direction::UP_DIR);
+                            } else{
+                                gtpTunnulizer.set_last_packet_direction(GtpTunnulizer::Direction::DOWN_DIR);
+                            }
+                                pkt_indication.m_desc.SetInitSide( init_side  );
+                            Append(&pkt_indication);
+                        }else{
+                            m_total_errors++;
+                        }
+                    }else{
+                        /* support multi-flow,  */
+
+                        /* work in respect to first flow */
+                        bool init_side=
+                                ((first_flow_fif_is_swap?true:false) == pkt_indication.m_desc.IsSwapTuple())?true:false;
+                        if (init_side){
+                            gtpTunnulizer.set_last_packet_direction(GtpTunnulizer::Direction::UP_DIR);
+                        } else{
+                            gtpTunnulizer.set_last_packet_direction(GtpTunnulizer::Direction::DOWN_DIR);
+                        }
+                        pkt_indication.m_desc.SetInitSide( init_side  );
+                        Append(&pkt_indication);
+                    }
+                }
+            }else{
+                fprintf(stderr, "ERROR packet %d is not supported, should be Ethernet/IP(0x0800)/(TCP|UDP) format try to convert it using Wireshark !\n",cnt);
+                return kPktNotSupp;
+            }
+        }else{
+            fprintf(stderr, "ERROR packet %d is not supported, should be Ethernet/IP(0x0800)/(TCP|UDP) format try to convert it using Wireshark !\n",cnt);
+            return kPktProcessFail;
+        }
+    }
+
+    if (Size() == 0) {
+        fprintf(stderr, "Error: Cap file '%s' is empty. Please remove it from the config file and try again.\n"
+                , cap_file.c_str());
+        return kEmptyFile;
+    }
+    /* set the last */
+    CFlowPktInfo * last_pkt =GetPacket((uint32_t)(Size()-1));
+    last_pkt->m_pkt_indication.m_desc.SetIsLastPkt(true);
+
+    int i;
+
+    for (i=0; i<Size(); i++) {
+        CFlowPktInfo * lp= GetPacket((uint32_t)i);
+        lp->m_pkt_indication.PostProcessIpv6Packet();
+    }
+
+
+    for (i=1; i<Size(); i++) {
+        CFlowPktInfo * lp_prev= GetPacket((uint32_t)i-1);
+        CFlowPktInfo * lp= GetPacket((uint32_t)i);
+
+        lp_prev->m_pkt_indication.m_cap_ipg = lp->m_pkt_indication.m_cap_ipg-
+                                              lp_prev->m_pkt_indication.m_cap_ipg;
+        if ( lp->m_pkt_indication.m_desc.IsInitSide() !=
+             lp_prev->m_pkt_indication.m_desc.IsInitSide()) {
+            lp_prev->m_pkt_indication.m_desc.SetRtt(true);
+        }
+    }
+
+    GetPacket((uint32_t)Size()-1)->m_pkt_indication.m_cap_ipg=0.0;
+    m_total_errors += parser.m_counter.getTotalErrors();
+
+    flow.Delete();
+    parser.Delete();
+    delete lp;
+    if ( m_total_errors > 0 ) {
+        parser.m_counter.Dump(stdout);
+        fprintf(stderr, " ERORR in one of the cap file, you should have one flow per cap file or valid plugin \n");
+        return kCapFileErr;
+    }
+    return kOK;
+}
+
+
 
 
 void CCapFileFlowInfo::update_pcap_mode(){
@@ -2682,6 +2907,26 @@ void CCapFileFlowInfo::RemoveAll(){
 
 void CCapFileFlowInfo::Delete(){
     RemoveAll();
+}
+
+cGtpTidSelectionLogic *CCapFileFlowInfo::getGtp_tid_logic() const {
+    return gtp_tid_logic;
+}
+
+void CCapFileFlowInfo::setGtp_tid_logic(cGtpTidSelectionLogic *gtp_tid_logic) {
+
+    if (this->gtp_tid_logic!= nullptr){
+        delete(gtp_tid_logic);
+        gtp_tid_logic = 0;
+    }
+    this->gtp_tid_logic = gtp_tid_logic;
+}
+
+CCapFileFlowInfo::~CCapFileFlowInfo() {
+    if (gtp_tid_logic != nullptr){
+        delete(gtp_tid_logic);
+        gtp_tid_logic = 0;
+    }
 }
 
 void operator >> (const YAML::Node& node, CFlowYamlDpPkt & fi) {
@@ -2922,14 +3167,102 @@ void operator >> (const YAML::Node& node, CFlowsYamlInfo & flows_info) {
    }
 
    const YAML::Node& cap_info = node["cap_info"];
-   for(unsigned i=0;i<cap_info.size();i++) {
-       CFlowYamlInfo fi;
-       cap_info[i] >> fi;
-       fi.m_client_pool_idx =
-           flows_info.m_tuple_gen.get_client_pool_id(fi.m_client_pool_name);
-       fi.m_server_pool_idx =
-           flows_info.m_tuple_gen.get_server_pool_id(fi.m_server_pool_name);
-       flows_info.m_vec.push_back(fi);
+    CGtpFlowInfo cGtpFlowInfo;
+
+    for(unsigned i=0;i<cap_info.size();i++) {
+        cGtpFlowInfo.gtp_enabled = false;
+        if (cap_info[i].FindValue("gtp_enabled")){
+            cap_info[i]["gtp_enabled"] >> cGtpFlowInfo.gtp_enabled;
+            if (cGtpFlowInfo.gtp_enabled){
+                cap_info[i]["gtp_clients"] >> cGtpFlowInfo.gtp_clients;
+                cap_info[i]["gtp_servers"] >> cGtpFlowInfo.gtp_servers;
+                if (cap_info[i].FindValue("gtp_inner_client_ip_start_6")){
+                    if ( cap_info[i].FindValue("gtp_inner_client_ip_start_6") ) {
+                        const YAML::Node& src_ipv6_info = cap_info[i]["gtp_inner_client_ip_start_6"];
+                        if (src_ipv6_info.size() == 6 ){
+                            for(unsigned j=0;j<src_ipv6_info.size();j++) {
+                                uint32_t fi;
+                                const YAML::Node & node1 =src_ipv6_info;
+                                node1[j]  >> fi;
+                                cGtpFlowInfo.gtp_inner_client_ip_start_ipv6.push_back((uint16_t)fi);
+                            }
+                        }
+                    }
+
+                    if ( cap_info[i].FindValue("gtp_inner_server_ip_start_6") ) {
+                        const YAML::Node& src_ipv6_info = cap_info[i]["gtp_inner_server_ip_start_6"];
+                        if (src_ipv6_info.size() == 6 ){
+                            for(unsigned j=0;j<src_ipv6_info.size();j++) {
+                                uint32_t fi;
+                                const YAML::Node & node1 = src_ipv6_info;
+                                node1[j]  >> fi;
+                                cGtpFlowInfo.gtp_inner_server_ip_start_ipv6.push_back((uint16_t)fi);
+                            }
+                        }
+                    }
+
+                    if (cGtpFlowInfo.gtp_inner_server_ip_start_ipv6.size() == 6 &&
+                            cGtpFlowInfo.gtp_inner_client_ip_start_ipv6.size() == 6){
+                        utl_yaml_read_ip_addr(cap_info[i],"gtp_inner_client_ip_start",cGtpFlowInfo.gtp_inner_client_ip_start);
+                        utl_yaml_read_ip_addr(cap_info[i],"gtp_inner_server_ip_start",cGtpFlowInfo.gtp_inner_server_ip_start);
+                    }
+
+                }else{
+                    utl_yaml_read_ip_addr(cap_info[i],"gtp_inner_client_ip_start",cGtpFlowInfo.gtp_inner_client_ip_start);
+                    utl_yaml_read_ip_addr(cap_info[i],"gtp_inner_server_ip_start",cGtpFlowInfo.gtp_inner_server_ip_start);
+                }
+                cap_info[i]["gtp_server_tid_start"] >> cGtpFlowInfo.gtp_server_tid_start;
+                cap_info[i]["gtp_client_tid_start"] >> cGtpFlowInfo.gtp_client_tid_start;
+            }
+        }
+
+        CFlowYamlInfo fi;
+        cap_info[i] >> fi;
+
+        uint32 gtp_inner_server_ip_start_orig = cGtpFlowInfo.gtp_inner_server_ip_start;
+        uint32 gtp_inner_client_ip_start_orig = cGtpFlowInfo.gtp_inner_client_ip_start;
+
+        if (cGtpFlowInfo.gtp_enabled){
+            for(int sid =0; sid < cGtpFlowInfo.gtp_servers; sid++){
+
+               uint32_t gtp_server_ip = cGtpFlowInfo.gtp_inner_server_ip_start++;
+               uint32_t gtp_inner_src_ip_start_temp = cGtpFlowInfo.gtp_inner_client_ip_start;
+
+
+               for(int cid =0; cid < cGtpFlowInfo.gtp_clients; cid++){
+                   CFlowYamlInfo flowYamlInfo = fi;
+
+                   flowYamlInfo.gtp_server_tid_start = cGtpFlowInfo.gtp_server_tid_start;
+                   flowYamlInfo.gtp_client_tid_start = cGtpFlowInfo.gtp_client_tid_start;
+                   flowYamlInfo.gtp_inner_client_ip_start = gtp_inner_client_ip_start_orig;
+                   flowYamlInfo.gtp_inner_server_ip_start = gtp_inner_server_ip_start_orig;
+                   flowYamlInfo.gtp_client_ip_start =
+                           flows_info.m_tuple_gen.m_client_pool[flows_info.m_tuple_gen.get_client_pool_id(fi.m_client_pool_name)].m_ip_start ;
+                   flowYamlInfo.gtp_server_ip_start =
+                           flows_info.m_tuple_gen.m_server_pool[flows_info.m_tuple_gen.get_server_pool_id(fi.m_server_pool_name)].m_ip_start;
+                   flowYamlInfo.gtp_number_of_clients_behind_gtp = cGtpFlowInfo.gtp_clients;
+                   flowYamlInfo.gtp_client_ip = gtp_inner_src_ip_start_temp++;
+                   flowYamlInfo.gtp_number_of_servers_behind_gtp = cGtpFlowInfo.gtp_servers;
+                   flowYamlInfo.gtp_server_ip = gtp_server_ip;
+                   flowYamlInfo.gtp_inner_client_ip_start_v6 = cGtpFlowInfo.gtp_inner_client_ip_start_ipv6;
+                   flowYamlInfo.gtp_inner_server_ip_start_v6 = cGtpFlowInfo.gtp_inner_server_ip_start_ipv6;
+
+                   flowYamlInfo.m_gtp_enabled = true;
+
+                   flowYamlInfo.m_client_pool_idx =
+                           flows_info.m_tuple_gen.get_client_pool_id(fi.m_client_pool_name);
+                   flowYamlInfo.m_server_pool_idx =
+                           flows_info.m_tuple_gen.get_server_pool_id(fi.m_server_pool_name);
+                   flows_info.m_vec.push_back(flowYamlInfo);
+               }
+           }
+       } else {
+           fi.m_client_pool_idx =
+                   flows_info.m_tuple_gen.get_client_pool_id(fi.m_client_pool_name);
+           fi.m_server_pool_idx =
+                   flows_info.m_tuple_gen.get_server_pool_id(fi.m_server_pool_name);
+           flows_info.m_vec.push_back(fi);
+       }
    }
 
    if ( node.FindValue("tw") ){
@@ -3383,7 +3716,31 @@ bool CFlowGeneratorRec::Create(CFlowYamlInfo * info,
     m_policer.set_level(0.0);
     m_policer.set_bucket_size(100.0);
 
-    int res=m_flow_info.load_cap_file(info->m_name.c_str(),_id,m_info->m_plugin_id);
+    int res;
+    if (!info->m_gtp_enabled){
+
+        res=m_flow_info.load_cap_file(info->m_name.c_str(),
+                                      _id,m_info->m_plugin_id);
+    } else{
+
+        m_flow_info.setGtp_tid_logic(new cGtpTidSelectionLogic(info->gtp_server_ip_start,
+                                                               info->gtp_client_ip_start,
+                                                               info->gtp_inner_server_ip_start,
+                                                               info->gtp_inner_client_ip_start,
+                                                               info->gtp_server_tid_start,
+                                                               info->gtp_client_tid_start,
+                                                               info->gtp_number_of_servers_behind_gtp,
+                                                               info->gtp_number_of_clients_behind_gtp));
+
+        res=m_flow_info.load_cap_file_tunnelize_gtp(info->m_name.c_str(),
+                                                    _id,
+                                                    m_info->m_plugin_id,
+                                                    info->gtp_client_ip,
+                                                    info->gtp_server_ip,
+                                                    info->gtp_inner_client_ip_start_v6,
+                                                    info->gtp_inner_server_ip_start_v6);
+    }
+
     if ( res==0 ) {
         fixup_ipg_if_needed();
 
