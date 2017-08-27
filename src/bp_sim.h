@@ -66,6 +66,8 @@ limitations under the License.
 #include "utl_policer.h"
 #include "trex_platform.h"
 #include "trex_global.h"
+#include "gtp/GtpTunnulizer.h"
+#include "gtp/cGtpTidSelectionLogic.h"
 
 
 /* stateless includes */
@@ -432,6 +434,18 @@ public:
 };
 
 
+struct CGtpFlowInfo{
+    bool gtp_enabled = false;
+    unsigned gtp_servers;
+    unsigned gtp_clients;
+    unsigned gtp_server_tid_start;
+    unsigned gtp_client_tid_start;
+    u_int32_t gtp_inner_client_ip_start;
+    u_int32_t gtp_inner_server_ip_start;
+    std::vector     <uint16_t> gtp_inner_client_ip_start_ipv6;
+    std::vector     <uint16_t> gtp_inner_server_ip_start_ipv6;
+};
+
 
 struct CFlowYamlInfo {
     CFlowYamlInfo(){
@@ -442,9 +456,28 @@ struct CFlowYamlInfo {
         m_cap_mode=false;
         m_ipg_sec=0.01;
         m_rtt_sec=0.01;
+        m_ipg_sec=0.01; 
+        m_rtt_sec=0.01; 
+        m_gtp_enabled = false;
     }
 
     std::string     m_name;
+
+    bool m_gtp_enabled;
+    uint32_t gtp_client_ip;
+    uint32_t gtp_number_of_clients_behind_gtp;
+    uint32_t gtp_number_of_servers_behind_gtp;
+    uint32_t gtp_server_ip;
+    uint32_t gtp_client_tid_start;
+    uint32_t gtp_server_tid_start;
+    uint32_t gtp_client_ip_start;
+    uint32_t gtp_server_ip_start;
+    std::vector     <uint16_t> gtp_inner_client_ip_start_v6;
+    std::vector     <uint16_t> gtp_inner_server_ip_start_v6;
+    uint32_t gtp_inner_client_ip_start;
+    uint32_t gtp_inner_server_ip_start;
+
+
     std::string     m_client_pool_name;
     std::string     m_server_pool_name;
     double          m_k_cps;    //k CPS
@@ -1660,6 +1693,7 @@ public:
     uint32_t            m_ticks;
     CPacketDescriptor   m_desc;
     CCapPktRaw *        m_packet;
+    uint32_t            m_gtp_header_offset = 0;
 
     CFlow *          m_flow;
     EthernetHeader * m_ether;
@@ -1674,6 +1708,8 @@ public:
         UDPHeader * m_udp;
         ICMPHeader * m_icmp;
     } l4;
+
+    bool            m_is_gtp = false;
     uint8_t *       m_payload;
     uint16_t        m_payload_len;
     uint16_t        m_packet_padding; /* total packet size - IP total length */
@@ -2037,6 +2073,8 @@ private:
 
     inline void update_mbuf(rte_mbuf_t * m);
 
+    inline void update_gtp_data(CGenNode *node);
+
     void alloc_const_mbuf();
 
     void free_const_mbuf();
@@ -2103,44 +2141,51 @@ inline void CFlowPktInfo::update_pkt_info2(char *p,
 
 
     /* replace port base on TCP/UDP */
-    if ( m_pkt_indication.m_desc.IsTcp() ) {
-        TCPHeader * tcp = (TCPHeader *)(p +m_pkt_indication.getFastTcpOffset());
-        BP_ASSERT(tcp);
-        /* replace port */
-        if ( flow_info->is_init_port_dir  ) {
-            tcp->setSourcePort(flow_info->client_port);
-            if ( flow_info->replace_server_port ){
-                tcp->setDestPort(flow_info->server_port);
-            }
-        }else{
-            tcp->setDestPort(flow_info->client_port);
-            if ( flow_info->replace_server_port ){
-                tcp->setSourcePort(flow_info->server_port);
-            }
-        }
-        update_tcp_cs(tcp,ipv4);
-
-    }else {
-        if ( m_pkt_indication.m_desc.IsUdp() ){
-            UDPHeader * udp =(UDPHeader *)(p +m_pkt_indication.getFastTcpOffset() );
-            BP_ASSERT(udp);
-            udp->setLength(udp->getLength() + update_len);
-            if ( flow_info->is_init_port_dir  ) {
-                udp->setSourcePort(flow_info->client_port);
-                if ( flow_info->replace_server_port ){
-                    udp->setDestPort(flow_info->server_port);
+    // we dont want to change port in gtp tunnels never
+    if (!m_pkt_indication.m_is_gtp) {
+        if (m_pkt_indication.m_desc.IsTcp()) {
+            TCPHeader *tcp = (TCPHeader *) (p + m_pkt_indication.getFastTcpOffset());
+            BP_ASSERT(tcp);
+            /* replace port */
+            if (flow_info->is_init_port_dir) {
+                tcp->setSourcePort(flow_info->client_port);
+                if (flow_info->replace_server_port) {
+                    tcp->setDestPort(flow_info->server_port);
                 }
-            }else{
-                udp->setDestPort(flow_info->client_port);
-                if ( flow_info->replace_server_port ){
-                    udp->setSourcePort(flow_info->server_port);
+            } else {
+                tcp->setDestPort(flow_info->client_port);
+                if (flow_info->replace_server_port) {
+                    tcp->setSourcePort(flow_info->server_port);
                 }
             }
-            update_udp_cs(udp,ipv4);
+            update_tcp_cs(tcp, ipv4);
 
-        }else{
-            BP_ASSERT(0);
+        } else {
+            if (m_pkt_indication.m_desc.IsUdp()) {
+                UDPHeader *udp = (UDPHeader *) (p + m_pkt_indication.getFastTcpOffset());
+                BP_ASSERT(udp);
+                udp->setLength(udp->getLength() + update_len);
+                if (flow_info->is_init_port_dir) {
+                    udp->setSourcePort(flow_info->client_port);
+                    if (flow_info->replace_server_port) {
+                        udp->setDestPort(flow_info->server_port);
+                    }
+                } else {
+                    udp->setDestPort(flow_info->client_port);
+                    if (flow_info->replace_server_port) {
+                        udp->setSourcePort(flow_info->server_port);
+                    }
+                }
+                update_udp_cs(udp, ipv4);
+
+            } else {
+                BP_ASSERT(0);
+            }
         }
+    } else{
+        // if gtp for sure we have an udp header
+        UDPHeader *udp = (UDPHeader *) (p + m_pkt_indication.getFastTcpOffset());
+        update_udp_cs(udp, ipv4);
     }
 }
 
@@ -2203,7 +2248,95 @@ inline void CFlowPktInfo::update_udp_cs(UDPHeader * udp,
         udp->setChecksum(0);
     }
 }
+class CCCapFileMemoryUsage;
+typedef CFlowPktInfo * flow_pkt_info_t;
+class CCapFileFlowInfo {
+public:
+    const int LEARN_MODE_MIN_IPG = 10; // msec
+    enum load_cap_file_err {
+        kOK = 0,
+        kFileNotExist,
+        kNegTimestamp,
+        kNoSyn,
+        kTCPOffsetTooBig,
+        kNoTCPFromServer,
+        kNoTCPSynAck,
+        kTCPLearnModeBadFlow,
+        kPktNotSupp,
+        kPktProcessFail,
+        kEmptyFile,
+        kCapFileErr,
+        kPlugInWithLearn,
+        kIPOptionNotAllowed,
+        kTCPIpgTooLow
+    };
 
+    bool Create();
+    void Delete();
+    uint64_t Size(void){
+        return (m_flow_pkts.size());
+    }
+    inline CFlowPktInfo * GetPacket(uint32_t index);
+    void Append(CPacketIndication * pkt_indication);
+    void RemoveAll();
+    void dump_pkt_sizes(void);
+    enum load_cap_file_err load_cap_file(std::string cap_file, uint16_t _id, uint8_t plugin_id);
+    enum load_cap_file_err load_cap_file_tunnelize_gtp(std::string cap_file,
+                                                       uint16_t _id,
+                                                       uint8_t plugin_id,
+                                                       uint32_t gtp_client_ip,
+                                                       uint32_t gtp_server_ip,
+                                                       std::vector     <uint16_t> gtp_inner_client_ip_start_v6,
+                                                       std::vector     <uint16_t> gtp_inner_server_ip_start_v6);
+    /* update flow info */
+    void update_info(CFlowYamlInfo *  info);
+
+    enum CCapFileFlowInfo::load_cap_file_err is_valid_template_load_time();
+
+    void save_to_erf(std::string cap_file_name,int pcap);
+
+    void generate_flow(CTupleTemplateGeneratorSmart   * tuple_gen,
+                       CNodeGenerator * gen,
+                       dsec_t time,
+                       uint64_t flow_id,
+                       CFlowYamlInfo *  template_info,
+                       CGenNode *     node);
+
+    inline uint64_t get_total_bytes(){
+        return (m_total_bytes);
+    }
+    inline uint64_t get_total_flows(){
+        return (m_total_flows);
+    }
+
+    inline uint64_t get_total_errors(){
+        return (m_total_errors);
+    }
+
+    // return the cap file length in sec
+    double get_cap_file_length_sec();
+
+    void get_total_memory(CCCapFileMemoryUsage & memory);
+
+public:
+    void update_min_ipg(dsec_t min_ipg, dsec_t override_ipg);
+    void update_ipg_by_factor(double factor,CFlowYamlInfo *  flow_info);
+    void update_pcap_mode();
+    void Dump(FILE *fd);
+
+private:
+    std::vector<flow_pkt_info_t> m_flow_pkts;
+    uint64_t                     m_total_bytes;
+    uint64_t                     m_total_flows;
+    uint64_t                     m_total_errors;
+    cGtpTidSelectionLogic *      gtp_tid_logic = nullptr;
+public:
+    cGtpTidSelectionLogic *getGtp_tid_logic() const;
+
+    void setGtp_tid_logic(cGtpTidSelectionLogic *gtp_tid_logic);
+
+    virtual ~CCapFileFlowInfo();
+};
 
 inline void CFlowPktInfo::update_pkt_info(char *p,
                                           CGenNode * node){
@@ -2328,38 +2461,43 @@ inline void CFlowPktInfo::update_pkt_info(char *p,
         }
     }
 
-
-    /* replace port base on TCP/UDP */
-    if ( m_pkt_indication.m_desc.IsTcp() ) {
-        TCPHeader * tcp = (TCPHeader *)(p +m_pkt_indication.getFastTcpOffset());
-        BP_ASSERT(tcp);
-        /* replace port */
-        if ( port_dir ==  CLIENT_SIDE ) {
-            tcp->setSourcePort(src_port);
-            tcp->setAckNumber(tcp->getAckNumber() + tcp_seq_diff_server);
-        }else{
-            tcp->setDestPort(src_port);
-            tcp->setAckNumber(tcp->getAckNumber() + tcp_seq_diff_client);
-        }
-        update_tcp_cs(tcp,ipv4);
-    }else {
-        if ( m_pkt_indication.m_desc.IsUdp() ){
-            UDPHeader * udp =(UDPHeader *)(p +m_pkt_indication.getFastTcpOffset() );
-            BP_ASSERT(udp);
-
-            if ( port_dir ==  CLIENT_SIDE ) {
-                udp->setSourcePort(src_port);
-            }else{
-                udp->setDestPort(src_port);
+    if (!m_pkt_indication.m_is_gtp) {
+        /* replace port base on TCP/UDP */
+        if (m_pkt_indication.m_desc.IsTcp()) {
+            TCPHeader *tcp = (TCPHeader *) (p + m_pkt_indication.getFastTcpOffset());
+            BP_ASSERT(tcp);
+            /* replace port */
+            if (port_dir == CLIENT_SIDE) {
+                tcp->setSourcePort(src_port);
+                tcp->setAckNumber(tcp->getAckNumber() + tcp_seq_diff_server);
+            } else {
+                tcp->setDestPort(src_port);
+                tcp->setAckNumber(tcp->getAckNumber() + tcp_seq_diff_client);
             }
-            update_udp_cs(udp,ipv4);
-        }else{
+            update_tcp_cs(tcp, ipv4);
+        } else {
+            if (m_pkt_indication.m_desc.IsUdp()) {
+                UDPHeader *udp = (UDPHeader *) (p + m_pkt_indication.getFastTcpOffset());
+                BP_ASSERT(udp);
+
+                if (port_dir == CLIENT_SIDE) {
+                    udp->setSourcePort(src_port);
+                } else {
+                    udp->setDestPort(src_port);
+                }
+                update_udp_cs(udp, ipv4);
+            } else {
 #ifdef _DEBUG
-            if (!m_pkt_indication.m_desc.IsIcmp()) {
+                if (!m_pkt_indication.m_desc.IsIcmp()) {
                BP_ASSERT(0);
             }
 #endif
+            }
         }
+    }else{
+        UDPHeader *udp = (UDPHeader *) (p + m_pkt_indication.getFastTcpOffset());
+        update_udp_cs(udp, ipv4);
+
     }
 }
 
@@ -2375,6 +2513,10 @@ inline rte_mbuf_t * CFlowPktInfo::do_generate_new_mbuf_ex(CGenNode * node,
     char *p=rte_pktmbuf_append(m, len);
 
     BP_ASSERT ( (((uintptr_t)m_packet->raw) & 0x7f )== 0) ;
+
+    if (unlikely(m_pkt_indication.m_is_gtp)) {
+        update_gtp_data(node);
+    }
 
     memcpy(p,m_packet->raw,len);
 
@@ -2488,6 +2630,10 @@ inline rte_mbuf_t * CFlowPktInfo::do_generate_new_mbuf(CGenNode * node){
 
     BP_ASSERT ( (((uintptr_t)m_packet->raw) & 0x7f )== 0) ;
 
+    if (unlikely(m_pkt_indication.m_is_gtp)) {
+        update_gtp_data(node);
+    }
+
     memcpy(p,m_packet->raw,len);
 
     update_mbuf(m);
@@ -2497,6 +2643,50 @@ inline rte_mbuf_t * CFlowPktInfo::do_generate_new_mbuf(CGenNode * node){
     append_big_mbuf(m,node);
 
     return m;
+}
+
+inline void CFlowPktInfo::update_gtp_data(CGenNode *node) {
+
+    gtp_header_t * gtp_header = ((gtp_header_t *)(m_packet->raw + m_pkt_indication.m_gtp_header_offset));
+
+    uint32_t gtp_ip_source;
+    uint32_t gtp_ip_dest;
+    if ( unlikely (m_pkt_indication.is_ipv6())) {
+
+        // Update the IPv6 address
+        IPv6Header * ipv6 = (IPv6Header *)(m_packet->raw + m_pkt_indication.m_gtp_header_offset + sizeof(gtp_header_t));
+
+        gtp_ip_dest = ipv6->getDestIpv6LSB();
+        gtp_ip_source  = ipv6->getSourceIpv6LSB();
+    }else{
+
+        gtp_ip_source = htobe32(((IPHeader *) (m_packet->raw +
+                                               m_pkt_indication.m_gtp_header_offset +
+                                               sizeof(gtp_header_t)))->mySource);
+        gtp_ip_dest = htobe32(((IPHeader *) (m_packet->raw +
+                                             m_pkt_indication.m_gtp_header_offset +
+                                             sizeof(gtp_header_t)))->myDestination);
+    }
+
+
+
+    if (node->cur_pkt_ip_addr_dir() == CLIENT_SIDE) {
+
+
+        gtp_header->gtp_tunnel_Id =
+                htobe32(node->m_flow_info->getGtp_tid_logic()->
+                        get_tid_client_to_server(node->m_src_ip,
+                                                 gtp_ip_source,
+                                                 node->m_dest_ip,
+                                                 gtp_ip_dest));
+    } else {
+        gtp_header->gtp_tunnel_Id =
+                htobe32(node->m_flow_info->getGtp_tid_logic()->
+                        get_tid_server_to_client(node->m_src_ip,
+                                                 gtp_ip_source,
+                                                 node->m_dest_ip,
+                                                 gtp_ip_dest));
+    }
 }
 
 
@@ -2586,81 +2776,6 @@ public:
 
 
 
-class CCapFileFlowInfo {
-public:
-    const int LEARN_MODE_MIN_IPG = 10; // msec
-
-    enum load_cap_file_err {
-    kOK = 0,
-    kFileNotExist,
-    kNegTimestamp,
-    kNoSyn,
-    kTCPOffsetTooBig,
-    kNoTCPFromServer,
-    kNoTCPSynAck,
-    kTCPLearnModeBadFlow,
-    kPktNotSupp,
-    kPktProcessFail,
-    kEmptyFile,
-    kCapFileErr,
-    kPlugInWithLearn,
-    kIPOptionNotAllowed,
-    kTCPIpgTooLow
-    };
-
-    bool Create();
-    void Delete();
-    uint64_t Size(void){
-        return (m_flow_pkts.size());
-    }
-    inline CFlowPktInfo * GetPacket(uint32_t index);
-    void Append(CPacketIndication * pkt_indication);
-    void RemoveAll();
-    void dump_pkt_sizes(void);
-    enum load_cap_file_err load_cap_file(std::string cap_file, uint16_t _id, uint8_t plugin_id);
-
-    /* update flow info */
-    void update_info(CFlowYamlInfo *  info);
-
-    enum CCapFileFlowInfo::load_cap_file_err is_valid_template_load_time();
-
-    void save_to_erf(std::string cap_file_name,int pcap);
-
-    void generate_flow(CTupleTemplateGeneratorSmart   * tuple_gen,
-                              CNodeGenerator * gen,
-                              dsec_t time,
-                              uint64_t flow_id,
-                              CFlowYamlInfo *  template_info,
-                              CGenNode *     node);
-
-    inline uint64_t get_total_bytes(){
-        return (m_total_bytes);
-    }
-    inline uint64_t get_total_flows(){
-        return (m_total_flows);
-    }
-
-    inline uint64_t get_total_errors(){
-        return (m_total_errors);
-    }
-
-    // return the cap file length in sec
-    double get_cap_file_length_sec();
-
-    void get_total_memory(CCCapFileMemoryUsage & memory);
-
-public:
-    void update_min_ipg(dsec_t min_ipg, dsec_t override_ipg);
-    void update_ipg_by_factor(double factor,CFlowYamlInfo *  flow_info);
-    void update_pcap_mode();
-    void Dump(FILE *fd);
-
-private:
-    std::vector<flow_pkt_info_t> m_flow_pkts;
-    uint64_t                     m_total_bytes;
-    uint64_t                     m_total_flows;
-    uint64_t                     m_total_errors;
-};
 
 
 
