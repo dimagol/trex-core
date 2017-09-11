@@ -415,13 +415,9 @@ bool GtpTunnulizer::set_last_packet_direction(GtpTunnulizer::Direction direction
 void
 GtpTunnulizer::init_flow_args_ipv6(const uint16_t *gtp_client_v6_addr,
                                    uint32_t  gtp_client_v6_addr_lsb,
-                                   uint32_t gtp_client_tid,
                                    const uint16_t *gtp_server_v6_addr,
-                                   uint32_t  gtp_server_v6_addr_lsb,
-                                   uint32_t gtp_server_tid) {
+                                   uint32_t  gtp_server_v6_addr_lsb) {
     this->in_gtp_is_ipv6 = true;
-    this->gtp_client_tid = gtp_client_tid;
-    this->gtp_server_tid = gtp_server_tid;
     this->gtp_client_ip = gtp_client_v6_addr_lsb;
     this->gtp_server_ip = gtp_server_v6_addr_lsb;
     for(int i = 0; i < 6; i++){
@@ -430,14 +426,9 @@ GtpTunnulizer::init_flow_args_ipv6(const uint16_t *gtp_client_v6_addr,
     }
 }
 
-void GtpTunnulizer::init_flow_args(uint32_t gtp_client_ip,
-                    uint32_t gtp_client_tid,
-                    uint32_t gtp_server_ip,
-                    uint32_t gtp_server_tid){
+void GtpTunnulizer::init_flow_args(uint32_t gtp_client_ip, uint32_t gtp_server_ip){
     this->gtp_client_ip = gtp_client_ip;
-    this->gtp_client_tid = gtp_client_tid;
     this->gtp_server_ip = gtp_server_ip;
-    this->gtp_server_tid = gtp_server_tid;
 }
 
 
