@@ -1773,11 +1773,10 @@ CCapFileFlowInfo::load_cap_file_tunnelize_gtp(std::string cap_file,
         }
         gtpTunnulizer.init_flow_args_ipv6(arr_gtp_inner_client_ip_start_v6,
                                           gtp_client_ip,
-                                          0,arr_gtp_inner_server_ip_start_v6,
-                                          gtp_server_ip,
-                                          0);
+                                          arr_gtp_inner_server_ip_start_v6,
+                                          gtp_server_ip);
     } else{
-        gtpTunnulizer.init_flow_args(gtp_client_ip, 0,gtp_server_ip, 0);
+        gtpTunnulizer.init_flow_args(gtp_client_ip, gtp_server_ip);
     }
 
     fprintf(stdout," -- loading cap file %s \n",cap_file.c_str());
@@ -1789,7 +1788,7 @@ CCapFileFlowInfo::load_cap_file_tunnelize_gtp(std::string cap_file,
         printf(" ERROR file %s does not exist or not supported \n",(char *)cap_file.c_str());
         return kFileNotExist;
     }
-    bool multi_flow_enable = plugin_id != 0;
+    bool multi_flow_enable = plugin_id != 0 || true;
 
 
     CFlowTableMap flow;
@@ -1830,7 +1829,7 @@ CCapFileFlowInfo::load_cap_file_tunnelize_gtp(std::string cap_file,
                 pkt_indication.m_desc.SetIsUdp(true);
                 pkt_indication.m_is_gtp = true;
                 pkt_indication.m_gtp_header_offset = gtpTunnulizer.get_last_packet_gtp_header_offset();
-                pkt_indication.m_desc.SetPluginEnable(multi_flow_enable);
+                pkt_indication.m_desc.SetPluginEnable(multi_flow_enable && plugin_id);
                 pkt_indication.m_desc.SetPluginId(plugin_id);
 
                 pkt_indication.m_desc.SetId(_id);

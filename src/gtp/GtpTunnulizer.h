@@ -26,16 +26,12 @@ public:
         DOWN_DIR = 1
     };
     void init_flow_args(uint32_t gtp_client_ip,
-                        uint32_t gtp_client_tid,
-                        uint32_t gtp_server_ip,
-                        uint32_t gtp_server_tid);
+                        uint32_t gtp_server_ip);
 
     void init_flow_args_ipv6(const uint16_t *gtp_client_v6_addr,
                              uint32_t  gtp_client_v6_addr_lsb,
-                             uint32_t gtp_client_tid,
                              const uint16_t *gtp_server_v6_addr,
-                             uint32_t  gtp_server_v6_addr_lsb,
-                             uint32_t gtp_server_tid);
+                             uint32_t  gtp_server_v6_addr_lsb);
 
     bool tunnulize_next_packet(CCapPktRaw &raw_packet);
 
@@ -45,9 +41,7 @@ public:
 
 private:
     uint32_t gtp_client_ip;
-    uint32_t gtp_client_tid;
     uint32_t gtp_server_ip;
-    uint32_t gtp_server_tid;
     uint16_t gtp_client_seq = 1;
     uint16_t gtp_server_seq = 1;
     gtp_header_t * gtp_header_in_last_packet;
