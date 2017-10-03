@@ -894,8 +894,6 @@ void CPacketIndication::UpdateMbufSize(){
         }
     }
 
-   // we want to make sure that the gtp tunnel tid will be stored in the first mbuf to make
-   // the gtp tid manipulation 128 size will make sure that we have the gtp header in the first fragment
 
     // we want to make sure that the gtp tunnel tid will be stored in the first mbuf to make
     // the gtp tid manipulation 128 size will make sure that we have the gtp header in the first fragment
@@ -3181,6 +3179,22 @@ void operator >> (const YAML::Node& node, CFlowsYamlInfo & flows_info) {
             if (cGtpFlowInfo.gtp_enabled){
                 cap_info[i]["gtp_clients"] >> cGtpFlowInfo.gtp_clients;
                 cap_info[i]["gtp_servers"] >> cGtpFlowInfo.gtp_servers;
+
+                if(cap_info[i].FindValue("gtp_ignore_client_range")){
+                    const YAML::Node& gtp_ignore_range = cap_info[i]["gtp_ignore_client_range"];
+                    if (gtp_ignore_range.size() != 0 &&
+                            gtp_ignore_range.size() % 2 == 0){
+
+                        for(unsigned j=0;j<gtp_ignore_range.size();j++) {
+                            uint32_t fi;
+                            const YAML::Node & node1 = gtp_ignore_range;
+                            node1[j]  >> fi;
+                            cGtpFlowInfo.gtp_ignored_clients_ranges.push_back(fi);
+                        }
+                    }
+                }
+
+
                 if (cap_info[i].FindValue("gtp_inner_client_ip_start_6")){
                     if ( cap_info[i].FindValue("gtp_inner_client_ip_start_6") ) {
                         const YAML::Node& src_ipv6_info = cap_info[i]["gtp_inner_client_ip_start_6"];
@@ -3236,6 +3250,18 @@ void operator >> (const YAML::Node& node, CFlowsYamlInfo & flows_info) {
 
                for(int cid =0; cid < cGtpFlowInfo.gtp_clients; cid++){
                    CFlowYamlInfo flowYamlInfo = fi;
+                   bool should_cont = false;
+                   for (int index = 0; index < cGtpFlowInfo.gtp_ignored_clients_ranges.size(); index+=2){
+                       if(cid > cGtpFlowInfo.gtp_ignored_clients_ranges[index] && cid < cGtpFlowInfo.gtp_ignored_clients_ranges[index+1]){
+                           should_cont = true;
+                           break;
+                       }
+                   }
+                   if(should_cont) {
+                       gtp_inner_src_ip_start_temp++;
+                       continue;
+                   }
+
 
                    flowYamlInfo.gtp_server_tid_start = cGtpFlowInfo.gtp_server_tid_start;
                    flowYamlInfo.gtp_client_tid_start = cGtpFlowInfo.gtp_client_tid_start;

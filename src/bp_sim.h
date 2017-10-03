@@ -1562,6 +1562,8 @@ struct CGtpFlowInfo{
     u_int32_t gtp_inner_server_ip_start;
     std::vector     <uint16_t> gtp_inner_client_ip_start_ipv6;
     std::vector     <uint16_t> gtp_inner_server_ip_start_ipv6;
+    std::vector     <uint32_t> gtp_ignored_clients_ranges;
+
 };
 
 
