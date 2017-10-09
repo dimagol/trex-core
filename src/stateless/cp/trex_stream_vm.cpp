@@ -590,14 +590,16 @@ void StreamVm::build_flow_var_table() {
             /* for random packet size - we need to find the average */
             if (var.m_ins.m_ins_flowv->m_op == StreamVmInstructionFlowMan::FLOW_VAR_OP_RANDOM) {
                 uint16_t range = var.m_ins.m_ins_flowv->m_max_value - var.m_ins.m_ins_flowv->m_min_value;
-                m_expected_pkt_size = var.m_ins.m_ins_flowv->m_min_value + g_fastrand_util.calc_fastrand_avg(range);
+                m_pkt_len_data.m_expected_pkt_len = var.m_ins.m_ins_flowv->m_min_value + g_fastrand_util.calc_fastrand_avg(range);
             } else {
-                m_expected_pkt_size = (var.m_ins.m_ins_flowv->m_min_value + var.m_ins.m_ins_flowv->m_max_value) / 2.0;
+                m_pkt_len_data.m_expected_pkt_len = (var.m_ins.m_ins_flowv->m_min_value + var.m_ins.m_ins_flowv->m_max_value) / 2.0;
+
             }
-            
+            m_pkt_len_data.m_max_pkt_len = var.m_ins.m_ins_flowv->m_max_value;
+            m_pkt_len_data.m_min_pkt_len = var.m_ins.m_ins_flowv->m_min_value;
+
         }
     }
-
 }
 
 void StreamVm::alloc_bss(){
@@ -638,19 +640,22 @@ void StreamVm::build_program(){
 
         if (ins_type == StreamVmInstruction::itFIX_HW_CS) {
             StreamVmInstructionFixHwChecksum *lpFix =(StreamVmInstructionFixHwChecksum *)inst;
+            bool is_ip = (lpFix->m_l4_type==StreamVmInstructionFixHwChecksum::L4_TYPE_IP?true:false);
+            uint16_t l3_len =lpFix->m_l3_len;
+
             if (lpFix->m_l2_len < 14 ) {
                 std::stringstream ss;
                 ss << "instruction id '" << ins_id << "' fix hw offset l2 " << lpFix->m_l2_len << "  is lower than 14 ";
                 err(ss.str());
             }
 
-            if (lpFix->m_l3_len < 20 ) {
+            if ((is_ip==false) && (l3_len < 20 ) ) {
                 std::stringstream ss;
-                ss << "instruction id '" << ins_id << "' fix hw offset l3 " << lpFix->m_l3_len << "  is lower than 20 ";
+                ss << "instruction id '" << ins_id << "' fix hw offset l3 " << l3_len << "  is lower than 20 ";
                 err(ss.str());
             }
 
-            uint16_t total_l4_offset = lpFix->m_l2_len + lpFix->m_l3_len;
+            uint16_t total_l4_offset = lpFix->m_l2_len + l3_len;
             uint16_t l4_header_size =0;
 
 
@@ -660,16 +665,21 @@ void StreamVm::build_program(){
                 IPHeader * ipv4= (IPHeader *)(m_pkt+lpFix->m_l2_len);
                 if (ipv4->getVersion() ==4 ) {
                     packet_is_ipv4=true;
-                    if (ipv4->getSize() != lpFix->m_l3_len ) {
-                        std::stringstream ss;
-                        ss << "instruction id '" << ins_id << "' fix hw command IPv4 header size is not valid  " << ipv4->getSize() ;
-                        err(ss.str());
-                    }
-                    if ( !((ipv4->getNextProtocol() == IPHeader::Protocol::TCP) || 
-                          (ipv4->getNextProtocol() == IPHeader::Protocol::UDP) ) ) {
-                        std::stringstream ss;
-                        ss << "instruction id '" << ins_id << "' fix hw command L4 should be TCP or UDP  " << ipv4->getSize() ;
-                        err(ss.str());
+                    if (is_ip){
+                        /* take it from the packet */
+                        l3_len = ipv4->getSize();
+                    }else{
+                        if (ipv4->getSize() != l3_len ) {
+                            std::stringstream ss;
+                            ss << "instruction id '" << ins_id << "' fix hw command IPv4 header size is not valid  " << ipv4->getSize() ;
+                            err(ss.str());
+                        }
+                        if ( !((ipv4->getNextProtocol() == IPHeader::Protocol::TCP) || 
+                              (ipv4->getNextProtocol() == IPHeader::Protocol::UDP) ) ) {
+                            std::stringstream ss;
+                            ss << "instruction id '" << ins_id << "' fix hw command L4 should be TCP or UDP  " << ipv4->getSize() ;
+                            err(ss.str());
+                        }
                     }
                 }else{
                     if (ipv4->getVersion() ==6) {
@@ -683,7 +693,7 @@ void StreamVm::build_program(){
 
                 StreamDPOpHwCsFix ipv_fix;
                 ipv_fix.m_l2_len = lpFix->m_l2_len;
-                ipv_fix.m_l3_len = lpFix->m_l3_len;
+                ipv_fix.m_l3_len = l3_len;
                 ipv_fix.m_op = StreamDPVmInstructions::ditFIX_HW_CS;
 
                 if (packet_is_ipv4) {
@@ -692,10 +702,14 @@ void StreamVm::build_program(){
                         ipv_fix.m_ol_flags = (PKT_TX_IPV4 | PKT_TX_IP_CKSUM | PKT_TX_TCP_CKSUM);
                         l4_header_size = TCP_HEADER_LEN;
                     }else{
-                        assert( ipv4->getNextProtocol() == IPHeader::Protocol::UDP );
-                        /* Ipv4 UDP */
-                        ipv_fix.m_ol_flags = (PKT_TX_IPV4 | PKT_TX_IP_CKSUM | PKT_TX_UDP_CKSUM);
-                        l4_header_size = UDP_HEADER_LEN;
+                        if (ipv4->getNextProtocol() == IPHeader::Protocol::UDP) {
+                            /* Ipv4 UDP */
+                            ipv_fix.m_ol_flags = (PKT_TX_IPV4 | PKT_TX_IP_CKSUM | PKT_TX_UDP_CKSUM);
+                            l4_header_size = UDP_HEADER_LEN;
+                        }else{
+                            ipv_fix.m_ol_flags = (PKT_TX_IPV4 | PKT_TX_IP_CKSUM );
+                            l4_header_size = 0;
+                        }
                     }
                 }else{
                     /* Ipv6*/
@@ -710,7 +724,7 @@ void StreamVm::build_program(){
                             l4_header_size = UDP_HEADER_LEN;
                         }else{
                             std::stringstream ss;
-                            ss << "instruction id '" << ins_id << "' fix hw command offsets should be TCP or UDP ";
+                            ss << "instruction id '" << ins_id << "' fix hw command offsets should be TCP or UDP for IPv6 ";
                             err(ss.str());
                         }
                     }
@@ -1224,19 +1238,20 @@ StreamVm::~StreamVm() {
 }
 
 /**
- * calculate expected packet size of stream's VM
+ * calculate packet len data (min, max, expected size) of stream's VM
  * 
  */
-double
-StreamVm::calc_expected_pkt_size(uint16_t regular_pkt_size) const {
+void StreamVm::calc_pkt_len_data(uint16_t regular_pkt_size, TrexStreamPktLenData &pkt_len_data) const {
 
     /* if no packet size change - simply return the regular packet size */
     if (!m_is_change_pkt_size) {
-        return regular_pkt_size;
+        pkt_len_data.m_expected_pkt_len = regular_pkt_size;
+        pkt_len_data.m_min_pkt_len = regular_pkt_size;
+        pkt_len_data.m_max_pkt_len = regular_pkt_size;
+        return;
     }
-    /* if we have an instruction that changes the packet size
-       so find the expected size
-       we must compile the VM temporarly to get this value
+    /* if we have an instruction that changes the packet size,
+       we must compile the VM temporarly to get values
      */
 
     StreamVm dummy;
@@ -1244,9 +1259,9 @@ StreamVm::calc_expected_pkt_size(uint16_t regular_pkt_size) const {
     this->clone(dummy);
     dummy.compile(regular_pkt_size);
 
-    assert(dummy.m_expected_pkt_size != 0);
+    assert(dummy.m_pkt_len_data.m_expected_pkt_len != 0);
 
-    return (dummy.m_expected_pkt_size);
+    pkt_len_data = dummy.m_pkt_len_data;
 }
 
 /** 

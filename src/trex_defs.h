@@ -1,3 +1,6 @@
+#ifndef __TREX_DEFS_H__
+#define __TREX_DEFS_H__
+
 /*
 Copyright (c) 2015-2016 Cisco Systems, Inc.
 
@@ -18,10 +21,12 @@ limitations under the License.
 #include <vector>
 #include <string>
 
-#ifndef __TREX_DEFS_H__
-#define __TREX_DEFS_H__
 
 #define TREX_MAX_PORTS 16
+
+#define MAX_SOCKETS_SUPPORTED   (4)
+#define MAX_THREADS_SUPPORTED   (120)
+
 
 // maximum number of IP ID type flow stats we support. Must be in the form 2^x - 1
 #define MAX_FLOW_STATS 1023

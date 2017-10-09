@@ -300,7 +300,10 @@ struct  tcpstat_int_t {
     uint64_t    tcps_delack;        /* delayed acks sent */
     uint64_t    tcps_sndtotal;      /* total packets sent */
     uint64_t    tcps_sndpack;       /* data packets sent */
-    uint64_t    tcps_sndbyte;       /* data bytes sent */
+
+    uint64_t    tcps_sndbyte;       /* data bytes sent by application layer  */
+    uint64_t    tcps_sndbyte_ok;    /* data bytes sent by tcp  */
+
     uint64_t    tcps_sndctrl;       /* control (SYN|FIN|RST) packets sent */
     uint64_t    tcps_sndacks;       /* ack-only packets sent */
     uint64_t    tcps_rcvtotal;      /* total packets received */
@@ -353,6 +356,7 @@ struct  tcpstat_int_t {
     uint64_t    tcps_reasalloc;     /* allocate tcp reasembly object */
     uint64_t    tcps_reasfree;      /* free tcp reasembly object  */
     uint64_t    tcps_nombuf;        /* no mbuf for tcp - drop the packets */
+    uint64_t    tcps_rcvackbyte_of;    /* bytes acked by rcvd acks */
 };
 
 /*
@@ -537,6 +541,9 @@ public:
 
 };
 
+class CTcpData;
+class CAstfTemplatesRW;
+
 class CTcpPerThreadCtx {
 public:
     bool Create(uint32_t size,
@@ -562,7 +569,13 @@ public:
     }
 
     void timer_w_on_tick();
+    bool timer_w_any_events(){
+        return(m_timer_w.is_any_events_left());
+    }
 
+    CTcpData *get_template_ro() {return m_template_ro;}
+    void set_template_ro(CTcpData *t) {m_template_ro = t;}
+    void set_template_rw(CAstfTemplatesRW *t) {m_template_rw = t;}
     void set_cb(CTcpCtxCb    * cb){
         m_cb=cb;
     }
@@ -604,6 +617,8 @@ public:
     uint32_t    m_tick;
     uint8_t     m_mbuf_socket;      /* memory socket */
     uint8_t     m_offload_flags;    /* dev offload flags, see flow def */
+    CAstfTemplatesRW * m_template_rw;
+    CTcpData    * m_template_ro;
     uint8_t     m_pad[2];
 
 
@@ -828,6 +843,7 @@ public:
 
     /* add bytes to tx queue */
     virtual void tx_sbappend(CTcpFlow * flow,uint32_t bytes){
+        INC_STAT_CNT(flow->m_ctx,tcps_sndbyte,bytes);
         flow->m_tcp.m_socket.so_snd.sbappend(bytes);
     }
 

@@ -478,7 +478,6 @@ int tcp_flow_input(CTcpPerThreadCtx * ctx,
     int iss = 0;
     uint32_t tiwin, ts_val, ts_ecr;
     int ts_present = 0;
-    int dropsocket = 0;
     short ostate=0;
     int optlen;
     int todrop, acked, ourfinisacked, needoutput = 0;
@@ -720,7 +719,6 @@ int tcp_flow_input(CTcpPerThreadCtx * ctx,
         tp->t_flags |= TF_ACKNOW;
         tp->t_state = TCPS_SYN_RECEIVED;
         tp->t_timer[TCPT_KEEP] = TCPTV_KEEP_INIT;
-        dropsocket = 0;     /* committed to socket */
         INC_STAT(ctx,tcps_accepts);
         goto trimthenstep6;
         }
@@ -1119,7 +1117,6 @@ trimthenstep6:
         }
         acked = ti->ti_ack - tp->snd_una;
         INC_STAT(ctx,tcps_rcvackpack);
-        INC_STAT_CNT(ctx,tcps_rcvackbyte,acked);
 
         /*
          * If we have a timestamp reply, update smoothed
@@ -1163,10 +1160,13 @@ trimthenstep6:
         tp->snd_cwnd = bsd_umin(cw + incr, TCP_MAXWIN<<tp->snd_scale);
         }
         if (acked > so->so_snd.sb_cc) {
+            INC_STAT_CNT(ctx,tcps_rcvackbyte,so->so_snd.sb_cc);
+            INC_STAT_CNT(ctx,tcps_rcvackbyte_of,(acked-so->so_snd.sb_cc));
             tp->snd_wnd -= so->so_snd.sb_cc;
             so->so_snd.sbdrop_all(so);
             ourfinisacked = 1;
         } else {
+            INC_STAT_CNT(ctx,tcps_rcvackbyte,acked);
             so->so_snd.sbdrop(so,acked);
             tp->snd_wnd -= acked;
             ourfinisacked = 0;
@@ -1449,8 +1449,6 @@ dropwithreset:
             TH_RST|TH_ACK);
     }
     /* destroy temporarily created socket */
-    if (dropsocket)
-        (void) soabort(so);
     return 0;
 
 drop:
@@ -1462,10 +1460,6 @@ drop:
     }
     rte_pktmbuf_free(m);
     /* destroy temporarily created socket */
-    if (dropsocket){
-        (void)soabort(so);
-    }
-
 
 findpcb:
     /* SYN packet that need to reopen the flow as the flow was closed already and free .. */

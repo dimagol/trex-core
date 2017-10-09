@@ -252,6 +252,7 @@ def options(opt):
     opt.add_option('--exe', action='store_true', default=False, help='Execute the program after it is compiled')
     opt.add_option('--performance', action='store_true', help='Build a performance report based on google analytics')
     opt.add_option('--performance-detailed',action='store_true',help='print detailed test results (date,time, build id and results) to csv file named _detailed_table.csv.')
+    opt.add_option('--ndr', action = 'store_true', help = 'Include build of NDR report.')
 
 def configure(conf):
     search_path = '~/.local/bin /usr/local/bin/ /usr/bin'
@@ -877,6 +878,36 @@ def build_stl_cp_docs (task):
         return 1
 
 
+def build_astf_cp_docs (task):
+    out_dir = task.outputs[0].abspath()
+    export_path = os.path.join(os.getcwd(), 'build', 'cp_astf_docs')
+    trex_core_git_path = get_trex_core_git()
+    if not trex_core_git_path: # there exists a default directory or the desired ENV variable.
+        return 1
+    trex_core_docs_path = os.path.abspath(os.path.join(trex_core_git_path, 'scripts', 'automation', 'trex_control_plane', 'doc_astf'))
+    sphinx_version = get_sphinx_version(task.env['SPHINX'][0])
+    if not sphinx_version:
+        return 1
+    if sphinx_version < 1.3:
+        additional_args = '-D html_theme=default'
+    else:
+        additional_args = ''
+    build_doc_cmd = "{pyt} {sph} {add} {ver} -W -b {bld} {src} {dst}".format(
+        pyt= sys.executable,
+        sph= task.env['SPHINX'][0],
+        add= additional_args,
+        ver= '' if Logs.verbose else '-q',
+        bld= "html", 
+        src= ".", 
+        dst= out_dir)
+    if Logs.verbose:
+        print(build_doc_cmd)
+    try:
+        return subprocess.call(shlex.split(build_doc_cmd), cwd = trex_core_docs_path)
+    except OSError as e:
+        print('Failed command: %s\nError: %s' % (build_doc_cmd, e))
+        return 1
+
 
 def build_cp(bld,dir,root,callback):
     export_path = os.path.join(os.getcwd(), 'build', dir)
@@ -900,6 +931,9 @@ def create_analytic_report(task):
         raise Exception('Error importing or using AnalyticsWebReport script: %s' % e)
 
 
+def create_ndr_report(task):
+    # TODO: get the data
+    pass
 
 
 
@@ -931,6 +965,12 @@ def build(bld):
         bld(rule=convert_to_html_toc_book, source='trex_analytics.asciidoc waf.css', target='trex_analytics.html',scan=ascii_doc_scan);
         return
 
+    if bld.options.ndr:
+        bld(rule=create_ndr_report)
+        bld.add_group()
+        bld(rule=convert_to_html_toc_book, source='trex_ndr_benchmark.asciidoc waf.css', target='trex_ndr_benchmark.html',scan=ascii_doc_scan);
+        return
+
     bld(rule=my_copy, target='my_chart.js')
 
     build_cp(bld,'hlt_args.asciidoc','stl/trex_stl_lib', parse_hlt_args)
@@ -955,6 +995,7 @@ def build(bld):
     bld(rule='${ASCIIDOC} -a docinfo -a stylesheet=${SRC[1].abspath()} -a  icons=true -a toc2  -a max-width=55em  -d book   -o ${TGT} ${SRC[0].abspath()}',
         source='draft_trex_stateless.asciidoc waf.css', target='draft_trex_stateless.html', scan=ascii_doc_scan)
 
+
     bld(rule='${ASCIIDOC} -a docinfo -a stylesheet=${SRC[1].abspath()} -a  icons=true -a toc2  -a max-width=55em  -d book   -o ${TGT} ${SRC[0].abspath()}',
         source='draft_trex_stateless_moved1.asciidoc waf.css', target='draft_trex_stateless1.html', scan=ascii_doc_scan)
 
@@ -967,9 +1008,7 @@ def build(bld):
     bld(rule=convert_to_pdf_book,source='trex_vm_manual.asciidoc waf.css', target='trex_vm_manual.pdf', scan=ascii_doc_scan)
 
     bld(rule=convert_to_pdf_book,source='trex_control_plane_peek.asciidoc waf.css', target='trex_control_plane_peek.pdf', scan=ascii_doc_scan)
-    
-    bld(rule=convert_to_html_toc_book, source='trex_ndr_benchmark.asciidoc waf.css', target='trex_ndr_benchmark.html',scan=ascii_doc_scan);
-    
+
     bld(rule=convert_to_pdf_book, source='trex_control_plane_design_phase1.asciidoc waf.css', target='trex_control_plane_design_phase1.pdf', scan=ascii_doc_scan)
 
     # with nice TOC 
@@ -981,6 +1020,11 @@ def build(bld):
 
     bld(rule=convert_to_html_toc_book,
         source='trex_stateless.asciidoc waf.css', target='trex_stateless.html',scan=ascii_doc_scan);
+
+    bld(rule=convert_to_html_toc_book,
+        source='trex_astf.asciidoc waf.css', target='trex_astf.html',scan=ascii_doc_scan);
+
+    bld(rule=convert_to_pdf_book,source='trex_astf.asciidoc waf.css', target='trex_astf.pdf', scan=ascii_doc_scan)
 
     bld(rule=convert_to_html_toc_book,
         source='trex_stateless_bench.asciidoc waf.css', target='trex_stateless_bench.html',scan=ascii_doc_scan);
@@ -1025,6 +1069,8 @@ def build(bld):
     build_cp(bld,'cp_docs','doc',build_cp_docs)
 
     build_cp(bld,'cp_stl_docs','doc_stl',build_stl_cp_docs)
+
+    build_cp(bld,'cp_astf_docs','doc_astf',build_astf_cp_docs)
 
 
 class Env(object):

@@ -1,5 +1,5 @@
 #! /usr/bin/python
-# hhaim 
+# hhaim
 import sys
 import os
 python_ver = 'python%s' % sys.version_info[0]
@@ -17,13 +17,15 @@ from collections import defaultdict, OrderedDict
 from distutils.util import strtobool
 import subprocess
 import platform
+import stat
 
 # exit code is Important should be
-# -1 : don't continue 
+# -1 : don't continue
 # 0  : no errors - no need to load mlx share object
-# 32  : no errors - mlx share object should be loaded 
+# 32  : no errors - mlx share object should be loaded
+# 64  : no errors - napatech 3GD should be running
 MLX_EXIT_CODE = 32
-
+NTACC_EXIT_CODE = 64
 class VFIOBindErr(Exception): pass
 
 PATH_ARR = os.getenv('PATH', '').split(':')
@@ -329,15 +331,15 @@ class CIfMap:
         self.m_is_mellanox_mode=False;
 
     def dump_error (self,err):
-        s="""%s  
+        s="""%s
 From this TRex version a configuration file must exist in /etc/ folder "
 The name of the configuration file should be /etc/trex_cfg.yaml "
 The minimum configuration file should include something like this
-- version       : 2 # version 2 of the configuration file 
-  interfaces    : ["03:00.0","03:00.1","13:00.1","13:00.0"]  # list of the interfaces to bind run ./dpdk_nic_bind.py --status to see the list 
-  port_limit      : 2 # number of ports to use valid is 2,4,6,8,10,12 
+- version       : 2 # version 2 of the configuration file
+  interfaces    : ["03:00.0","03:00.1","13:00.1","13:00.0"]  # list of the interfaces to bind run ./dpdk_nic_bind.py --status to see the list
+  port_limit      : 2 # number of ports to use valid is 2,4,6,8,10,12
 
-example of already bind devices 
+example of already bind devices
 
 $ ./dpdk_nic_bind.py --status
 
@@ -385,7 +387,7 @@ Other network devices
         # set PCIe Read to 1024 and not 512 ... need to add it to startup s
         val=self.read_pci (pci_id,68)
         if val[0]=='0':
-            #hypervisor does not give the right to write to this register 
+            #hypervisor does not give the right to write to this register
             return;
         if val[0]!='3':
             val='3'+val[1:]
@@ -398,7 +400,7 @@ Other network devices
               out=subprocess.check_output(['ifconfig', dev_id])
             except Exception as e:
               raise DpdkSetup(' "ifconfig %s" utility does not works, try to install it using "$yum install net-tools -y"  on CentOS system' %(dev_id) )
-            
+
             out=out.decode(errors='replace');
             obj=re.search(r'MTU:(\d+)',out,flags=re.MULTILINE|re.DOTALL);
             if obj:
@@ -421,7 +423,7 @@ Other network devices
         dev_mtu=self.get_mtu_mlx5 (dev_id);
         if (dev_mtu>0) and (dev_mtu!=mtu):
             self.set_mtu_mlx5(dev_id,mtu);
-            if self.get_mtu_mlx5(dev_id) != mtu: 
+            if self.get_mtu_mlx5(dev_id) != mtu:
                 print("Could not set MTU to %d" % mtu)
                 sys.exit(-1);
 
@@ -563,9 +565,45 @@ Other network devices
         dpdk_nic_bind.get_nic_details()
         self.m_devices= dpdk_nic_bind.devices
 
+    def preprocess_astf_file_is_needed(self):
+        """ check if we are in astf mode, in case we are convert the profile to json in tmp"""
+        is_astf_mode = map_driver.parent_args.astf
+        if is_astf_mode:
+            input_file = map_driver.parent_args.file
+            extension = os.path.splitext(input_file)[1]
+            if map_driver.parent_args.cfg is not '':
+                cfg_file = map_driver.parent_args.cfg
+            else:
+                cfg_file = "/etc/trex_cfg.yaml"
+
+            instance_name = ""
+            if map_driver.parent_args.prefix is not '':
+                instance_name = "-" + map_driver.parent_args.prefix
+            else:
+                with open(cfg_file, 'r') as stream:
+                    try:
+                        yaml_cfg = yaml.load(stream)
+                        if 'prefix' in yaml_cfg[0]:
+                            instance_name = '-' + yaml_cfg[0]['prefix']
+                    except yaml.YAMLError as exc:
+                        print(exc)
+
+            json_file = "/tmp/astf{instance}.json".format(instance=instance_name)
+            if extension !=".py":
+                raise DpdkSetup(' ERROR when running with --astf mode, you need to have a new python profile format (.py) and not YAML ')
+
+            msg="converting astf profile {file} to json {out}".format(file = input_file, out=json_file)
+            print(msg);
+            cmd = './astf-sim -f {file} --json > {json_file}'.format(file=input_file, json_file=json_file)
+            print(cmd)
+            if os.system(cmd)!=0:
+                raise DpdkSetup('ERROR could not convert astf profile to JSON try to debug it using the command above.')
+            os.chmod(json_file, stat.S_IRWXU | stat.S_IRWXG | stat.S_IRWXO)
+
     def do_run (self,only_check_all_mlx=False):
         """ return the number of mellanox drivers"""
 
+        self.preprocess_astf_file_is_needed()
         self.run_dpdk_lspci ()
         self.load_config_file()
         if (map_driver.parent_args is None or
@@ -600,7 +638,7 @@ Other network devices
 
         if not (map_driver.parent_args and map_driver.parent_args.dump_interfaces):
             if (Mellanox_cnt > 0) and (Mellanox_cnt != len(if_list)):
-               err=" All driver should be from one vendor. you have at least one driver from Mellanox but not all "; 
+               err=" All driver should be from one vendor. you have at least one driver from Mellanox but not all ";
                raise DpdkSetup(err)
             if Mellanox_cnt > 0:
                 self.set_only_mellanox_nics()
@@ -646,14 +684,25 @@ Other network devices
                 sys.exit(-1)
 
 
+        Napatech_cnt=0;
         to_bind_list = []
         for key in if_list:
             if key not in self.m_devices:
                 err=" %s does not exist " %key;
                 raise DpdkSetup(err)
 
+            if 'Napatech' in self.m_devices[key]['Vendor_str']:
+                # These adapters doesn't need binding
+                Napatech_cnt += 1
+                continue
+
             if self.m_devices[key].get('Driver_str') not in (dpdk_nic_bind.dpdk_drivers + dpdk_nic_bind.dpdk_and_kernel):
                 to_bind_list.append(key)
+
+        if Napatech_cnt:
+            # This is currently a hack needed until the DPDK NTACC PMD can do proper
+            # cleanup.
+            os.system("ipcs | grep 2117a > /dev/null && ipcrm shm `ipcs | grep 2117a | cut -d' '  -f2` > /dev/null")
 
         if to_bind_list:
             if Mellanox_cnt:
@@ -685,6 +734,9 @@ Other network devices
                     raise DpdkSetup('Unable to bind interfaces to driver igb_uio.')
         elif Mellanox_cnt:
             return MLX_EXIT_CODE
+        elif Napatech_cnt:
+            return NTACC_EXIT_CODE
+
 
     def do_return_to_linux(self):
         if not self.m_devices:
@@ -1009,10 +1061,13 @@ def parse_parent_cfg (parent_cfg):
     parent_parser = argparse.ArgumentParser(add_help = False)
     parent_parser.add_argument('-?', '-h', '--help', dest = 'help', action = 'store_true')
     parent_parser.add_argument('--cfg', default='')
+    parent_parser.add_argument('--prefix', default='')
     parent_parser.add_argument('--dump-interfaces', nargs='*', default=None)
     parent_parser.add_argument('--no-ofed-check', action = 'store_true')
     parent_parser.add_argument('--no-scapy-server', action = 'store_true')
     parent_parser.add_argument('--no-watchdog', action = 'store_true')
+    parent_parser.add_argument('--astf', action = 'store_true')
+    parent_parser.add_argument('-f', dest = 'file')
     parent_parser.add_argument('-i', action = 'store_true', dest = 'stl', default = False)
     map_driver.parent_args, _ = parent_parser.parse_known_args(shlex.split(parent_cfg))
     if map_driver.parent_args.help:
@@ -1020,7 +1075,7 @@ def parse_parent_cfg (parent_cfg):
 
 
 def process_options ():
-    parser = argparse.ArgumentParser(usage=""" 
+    parser = argparse.ArgumentParser(usage="""
 
 Examples:
 ---------
@@ -1052,7 +1107,7 @@ To see more detailed info on interfaces (table):
                       help=""" configuration file name  """,
      )
 
-    parser.add_argument("--parent",  
+    parser.add_argument("--parent",
                       help=argparse.SUPPRESS
      )
 
@@ -1130,6 +1185,8 @@ To see more detailed info on interfaces (table):
         parse_parent_cfg (map_driver.args.parent)
         if map_driver.parent_args.cfg:
             map_driver.cfg_file = map_driver.parent_args.cfg;
+        if map_driver.parent_args.prefix:
+            map_driver.prefix = map_driver.parent_args.prefix
     if  map_driver.args.cfg :
         map_driver.cfg_file = map_driver.args.cfg;
 

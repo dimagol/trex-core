@@ -83,6 +83,7 @@ extern "C" {
 #include "main_dpdk.h"
 #include "trex_watchdog.h"
 #include "utl_port_map.h"
+#include "astf/json_reader.h"
 
 #define RX_CHECK_MIX_SAMPLE_RATE 8
 #define RX_CHECK_MIX_SAMPLE_RATE_1G 2
@@ -119,6 +120,7 @@ static char g_socket_mem_str[200];
 static char g_prefix_str[100];
 static char g_loglevel_str[20];
 static char g_master_id_str[10];
+static char g_ntacc_so_id_str[50];
 static char g_mlx5_so_id_str[50];
 static char g_mlx4_so_id_str[50];
 static char g_image_postfix[10];
@@ -165,10 +167,13 @@ public:
     }
 
     virtual int stop_queue(CPhyEthIF * _if, uint16_t q_num);
-    void get_extended_stats_fixed(CPhyEthIF * _if, CPhyEthIFStats *stats, int fix_i, int fix_o);
-    virtual void get_extended_stats(CPhyEthIF * _if,CPhyEthIFStats *stats)=0;
+    bool get_extended_stats_fixed(CPhyEthIF * _if, CPhyEthIFStats *stats, int fix_i, int fix_o);
+    virtual bool get_extended_stats(CPhyEthIF * _if,CPhyEthIFStats *stats)=0;
     virtual void clear_extended_stats(CPhyEthIF * _if)=0;
     virtual int  wait_for_stable_link();
+    virtual bool sleep_after_arp_needed(){
+        return(false);
+    }
     virtual void wait_after_link_up();
     virtual bool hw_rx_stat_supported(){return false;}
     virtual int get_rx_stats(CPhyEthIF * _if, uint32_t *pkts, uint32_t *prev_pkts, uint32_t *bytes, uint32_t *prev_bytes
@@ -178,7 +183,7 @@ public:
     virtual void get_rx_stat_capabilities(uint16_t &flags, uint16_t &num_counters, uint16_t &base_ip_id) = 0;
 
     /* can't get CPhyEthIF as it won't be valid at that time */
-    virtual int verify_fw_ver(tvpid_t   tvpid) {return 0;}  
+    virtual int verify_fw_ver(tvpid_t   tvpid) {return 0;}
     virtual CFlowStatParser *get_flow_stat_parser();
     virtual int set_rcv_all(CPhyEthIF * _if, bool set_on)=0;
     virtual TRexPortAttr * create_port_attr(tvpid_t tvpid,repid_t repid) = 0;
@@ -243,7 +248,7 @@ public:
     virtual int configure_rx_filter_rules_statefull(CPhyEthIF * _if);
     virtual int configure_rx_filter_rules_stateless(CPhyEthIF * _if);
     virtual void clear_rx_filter_rules(CPhyEthIF * _if);
-    virtual void get_extended_stats(CPhyEthIF * _if,CPhyEthIFStats *stats);
+    virtual bool get_extended_stats(CPhyEthIF * _if,CPhyEthIFStats *stats);
     virtual void clear_extended_stats(CPhyEthIF * _if);
     virtual int dump_fdir_global_stats(CPhyEthIF * _if, FILE *fd) {return 0;}
     virtual void get_rx_stat_capabilities(uint16_t &flags, uint16_t &num_counters, uint16_t &base_ip_id) {
@@ -292,7 +297,7 @@ public:
     virtual void update_configuration(port_cfg_t * cfg);
     virtual int configure_rx_filter_rules(CPhyEthIF * _if);
     virtual int stop_queue(CPhyEthIF * _if, uint16_t q_num);
-    virtual void get_extended_stats(CPhyEthIF * _if,CPhyEthIFStats *stats)=0;
+    virtual bool get_extended_stats(CPhyEthIF * _if,CPhyEthIFStats *stats)=0;
     virtual void clear_extended_stats(CPhyEthIF * _if);
     virtual int wait_for_stable_link();
     virtual void get_rx_stat_capabilities(uint16_t &flags, uint16_t &num_counters, uint16_t &base_ip_id) {
@@ -315,7 +320,7 @@ public:
     static CTRexExtendedDriverBase * create(){
         return ( new CTRexExtendedDriverVirtio() );
     }
-    virtual void get_extended_stats(CPhyEthIF * _if,CPhyEthIFStats *stats);
+    virtual bool get_extended_stats(CPhyEthIF * _if,CPhyEthIFStats *stats);
 
     virtual void update_configuration(port_cfg_t * cfg);
 
@@ -331,7 +336,7 @@ public:
     static CTRexExtendedDriverBase * create() {
         return ( new CTRexExtendedDriverVmxnet3() );
     }
-    virtual void get_extended_stats(CPhyEthIF * _if,CPhyEthIFStats *stats);
+    virtual bool get_extended_stats(CPhyEthIF * _if,CPhyEthIFStats *stats);
     virtual void update_configuration(port_cfg_t * cfg);
 
 
@@ -343,8 +348,8 @@ public:
         CGlobalInfo::set_queues_mode(CGlobalInfo::Q_MODE_ONE_QUEUE);
         m_cap = /*TREX_DRV_CAP_DROP_Q  | TREX_DRV_CAP_MAC_ADDR_CHG */0;
     }
-    virtual void get_extended_stats(CPhyEthIF * _if, CPhyEthIFStats *stats) {
-        get_extended_stats_fixed(_if, stats, 4, 4);
+    virtual bool get_extended_stats(CPhyEthIF * _if, CPhyEthIFStats *stats) {
+        return get_extended_stats_fixed(_if, stats, 4, 4);
     }
     virtual void update_configuration(port_cfg_t * cfg);
     static CTRexExtendedDriverBase * create() {
@@ -359,8 +364,8 @@ public:
         CGlobalInfo::set_queues_mode(CGlobalInfo::Q_MODE_ONE_QUEUE);
         m_cap = /*TREX_DRV_CAP_DROP_Q  | TREX_DRV_CAP_MAC_ADDR_CHG */0;
     }
-    virtual void get_extended_stats(CPhyEthIF * _if, CPhyEthIFStats *stats) {
-        get_extended_stats_fixed(_if, stats, 4, 4);
+    virtual bool get_extended_stats(CPhyEthIF * _if, CPhyEthIFStats *stats) {
+        return get_extended_stats_fixed(_if, stats, 4, 4);
     }
 
     static CTRexExtendedDriverBase * create() {
@@ -380,7 +385,7 @@ public:
     }
     // e1000 driver handing us packets with ethernet CRC, so we need to chop them
     virtual void update_configuration(port_cfg_t * cfg);
-    virtual void get_extended_stats(CPhyEthIF * _if,CPhyEthIFStats *stats);
+    virtual bool get_extended_stats(CPhyEthIF * _if,CPhyEthIFStats *stats);
 
 };
 
@@ -407,7 +412,7 @@ public:
     virtual int configure_rx_filter_rules(CPhyEthIF * _if);
     virtual int configure_rx_filter_rules_stateless(CPhyEthIF * _if);
     virtual int configure_rx_filter_rules_statefull(CPhyEthIF * _if);
-    virtual void get_extended_stats(CPhyEthIF * _if,CPhyEthIFStats *stats);
+    virtual bool get_extended_stats(CPhyEthIF * _if,CPhyEthIFStats *stats);
     virtual void clear_extended_stats(CPhyEthIF * _if);
     virtual int wait_for_stable_link();
     virtual void get_rx_stat_capabilities(uint16_t &flags, uint16_t &num_counters, uint16_t &base_ip_id) {
@@ -455,7 +460,7 @@ public:
     virtual int configure_rx_filter_rules(CPhyEthIF * _if);
     virtual int add_del_rx_flow_stat_rule(CPhyEthIF * _if, enum rte_filter_op op, uint16_t l3_proto
                                           , uint8_t l4_proto, uint8_t ipv6_next_h, uint16_t id);
-    virtual void get_extended_stats(CPhyEthIF * _if,CPhyEthIFStats *stats);
+    virtual bool get_extended_stats(CPhyEthIF * _if,CPhyEthIFStats *stats);
     virtual void clear_extended_stats(CPhyEthIF * _if);
     virtual void reset_rx_stats(CPhyEthIF * _if, uint32_t *stats, int min, int len);
     virtual int get_rx_stats(CPhyEthIF * _if, uint32_t *pkts, uint32_t *prev_pkts, uint32_t *bytes, uint32_t *prev_bytes, int min, int max);
@@ -523,7 +528,7 @@ public:
     virtual void update_global_config_fdir(port_cfg_t * cfg){
     }
     void clear_extended_stats(CPhyEthIF * _if);
-    void get_extended_stats(CPhyEthIF * _if,CPhyEthIFStats *stats);
+    bool get_extended_stats(CPhyEthIF * _if,CPhyEthIFStats *stats);
 
     virtual int get_min_sample_rate(void){
         return (RX_CHECK_MIX_SAMPLE_RATE);
@@ -561,15 +566,21 @@ private:
 class CTRexExtendedDriverBaseMlnx5G : public CTRexExtendedDriverBase {
 public:
     CTRexExtendedDriverBaseMlnx5G(){
-        m_cap = TREX_DRV_CAP_DROP_Q | TREX_DRV_CAP_MAC_ADDR_CHG|TREX_DRV_DEFAULT_RSS_ON_RX_QUEUES ;
-        // In Mellanox, default mode is Q_MODE_MANY_DROP_Q.
-        // put it, unless user already choose mode using command line arg (--software for example)
-        if (CGlobalInfo::get_queues_mode() == CGlobalInfo::Q_MODE_NORMAL) {
-            if (get_is_tcp_mode()==false) {
-                CGlobalInfo::set_queues_mode(CGlobalInfo::Q_MODE_MANY_DROP_Q);
+
+        if (get_is_tcp_mode()) { /* PATCH for trex-481, move the device to software mode in case of TCP, 
+                                   better to have less accurate latency than errors of out-of-order  */
+            CGlobalInfo::set_queues_mode(CGlobalInfo::Q_MODE_ONE_QUEUE);
+            m_cap = /*TREX_DRV_CAP_DROP_Q  | TREX_DRV_CAP_MAC_ADDR_CHG */0;
+        }else{
+            m_cap = TREX_DRV_CAP_DROP_Q | TREX_DRV_CAP_MAC_ADDR_CHG|TREX_DRV_DEFAULT_RSS_ON_RX_QUEUES ;
+            // In Mellanox, default mode is Q_MODE_MANY_DROP_Q.
+            // put it, unless user already choose mode using command line arg (--software for example)
+            if (CGlobalInfo::get_queues_mode() == CGlobalInfo::Q_MODE_NORMAL) {
+                if (get_is_tcp_mode()==false) {
+                    CGlobalInfo::set_queues_mode(CGlobalInfo::Q_MODE_MANY_DROP_Q);
+                }
             }
         }
-
     }
 
     TRexPortAttr * create_port_attr(tvpid_t tvpid,repid_t repid) {
@@ -617,7 +628,7 @@ public:
     }
     virtual void update_configuration(port_cfg_t * cfg);
     virtual int configure_rx_filter_rules(CPhyEthIF * _if);
-    virtual void get_extended_stats(CPhyEthIF * _if,CPhyEthIFStats *stats);
+    virtual bool get_extended_stats(CPhyEthIF * _if,CPhyEthIFStats *stats);
     virtual void clear_extended_stats(CPhyEthIF * _if);
     virtual void reset_rx_stats(CPhyEthIF * _if, uint32_t *stats, int min, int len);
     virtual int get_rx_stats(CPhyEthIF * _if, uint32_t *pkts, uint32_t *prev_pkts, uint32_t *bytes, uint32_t *prev_bytes, int min, int max);
@@ -654,14 +665,107 @@ public:
         return ( new CTRexExtendedDriverMlnx4() );
     }
 
-    virtual void get_extended_stats(CPhyEthIF * _if,CPhyEthIFStats *stats) {
-        get_extended_stats_fixed(_if, stats, 4, 4);
+    virtual bool get_extended_stats(CPhyEthIF * _if,CPhyEthIFStats *stats) {
+        return get_extended_stats_fixed(_if, stats, 4, 4);
     };
 
     virtual void update_configuration(port_cfg_t * cfg);
 };
 
+#include <dlfcn.h>
 
+class CTRexExtendedDriverBaseNtAcc : public CTRexExtendedDriverBase {
+public:
+    CTRexExtendedDriverBaseNtAcc(){
+        m_cap = TREX_DRV_CAP_DROP_Q | TREX_DRV_CAP_DROP_PKTS_IF_LNK_DOWN;
+        TAILQ_INIT(&lh_fid);
+        // The current rte_flow.h is not C++ includable so rte_flow wrappers
+        // have been made in libntacc
+        void *libntacc = dlopen(g_ntacc_so_id_str, RTLD_NOW);
+        if (libntacc == NULL) {
+          /* Library does not exist. */
+          fprintf(stderr, "Failed to find needed library : %s\n", g_ntacc_so_id_str);
+          exit(-1);
+        }
+        ntacc_add_rules = (void* (*)(uint8_t, uint16_t,
+            uint8_t, int, char *))dlsym(libntacc, "ntacc_add_rules");
+        if (ntacc_add_rules == NULL) {
+          fprintf(stderr, "Failed to find \"ntacc_add_rules\" in %s\n", g_ntacc_so_id_str);
+          exit(-1);
+        }
+        ntacc_del_rules = (void * (*)(uint8_t, void*))dlsym(libntacc, "ntacc_del_rules");
+        if (ntacc_add_rules == NULL) {
+          fprintf(stderr, "Failed to find \"ntacc_del_rules\" in %s\n", g_ntacc_so_id_str);
+          exit(-1);
+        }
+    }
+
+    ~CTRexExtendedDriverBaseNtAcc();
+
+    TRexPortAttr * create_port_attr(tvpid_t tvpid,repid_t repid) {
+        return new DpdkTRexPortAttr(tvpid,repid, false, false);
+    }
+
+    virtual bool sleep_after_arp_needed(){
+        return(true);
+    }
+
+    static CTRexExtendedDriverBase * create(){
+        return ( new CTRexExtendedDriverBaseNtAcc() );
+    }
+
+    virtual void update_global_config_fdir(port_cfg_t * cfg){
+    }
+
+    virtual int get_min_sample_rate(void){
+        return (RX_CHECK_MIX_SAMPLE_RATE);
+    }
+
+    virtual void get_dpdk_drv_params(CTrexDpdkParams &p) {
+        p.rx_data_q_num = 1;
+        p.rx_drop_q_num = 1;
+        p.rx_desc_num_data_q = RX_DESC_NUM_DATA_Q;
+        p.rx_desc_num_drop_q = RX_DESC_NUM_DROP_Q;
+        p.tx_desc_num = TX_DESC_NUM;
+        p.rx_mbuf_type = MBUF_9k;
+    }
+
+    virtual void update_configuration(port_cfg_t * cfg);
+    virtual int configure_rx_filter_rules(CPhyEthIF * _if);
+    bool get_extended_stats(CPhyEthIF * _if,CPhyEthIFStats *stats);
+    void clear_extended_stats(CPhyEthIF * _if);
+    virtual void reset_rx_stats(CPhyEthIF * _if, uint32_t *stats, int min, int len);
+    virtual int get_rx_stats(CPhyEthIF * _if, uint32_t *pkts, uint32_t *prev_pkts, uint32_t *bytes, uint32_t *prev_bytes, int min, int max);
+    virtual int get_stat_counters_num() {return MAX_FLOW_STATS;}
+    virtual void get_rx_stat_capabilities(uint16_t &flags, uint16_t &num_counters, uint16_t &base_ip_id) {
+        // Even though the NIC support per flow statistics it is not yet available in the DPDK so SW must be used
+        flags = TrexPlatformApi::IF_STAT_IPV4_ID | TrexPlatformApi::IF_STAT_RX_BYTES_COUNT
+        | TrexPlatformApi::IF_STAT_PAYLOAD;
+        num_counters = MAX_FLOW_STATS;
+        base_ip_id = IP_ID_RESERVE_BASE;
+    }
+    virtual CFlowStatParser *get_flow_stat_parser();
+    virtual int dump_fdir_global_stats(CPhyEthIF * _if, FILE *fd);
+    virtual int set_rcv_all(CPhyEthIF * _if, bool set_on);
+    virtual int verify_fw_ver(int i);
+
+private:
+    void* (*ntacc_add_rules)(uint8_t port_id, uint16_t type,
+            uint8_t l4_proto, int queue, char *ntpl_str);
+    void* (*ntacc_del_rules)(uint8_t port_id, void *rte_flow);
+
+    virtual void add_del_rules(enum rte_filter_op op, uint8_t port_id, uint16_t type,
+                               uint8_t l4_proto, int queue, uint32_t f_id, char *ntpl_str);
+    virtual int add_del_eth_type_rule(uint8_t port_id, enum rte_filter_op op, uint16_t eth_type);
+    virtual int configure_rx_filter_rules_stateless(CPhyEthIF * _if);
+    struct fid_s {
+        uint8_t port_id;
+        uint32_t id;
+        void *rte_flow;
+        TAILQ_ENTRY(fid_s) leTQ; //!< TailQ element.
+    };
+    TAILQ_HEAD(, fid_s) lh_fid;
+};
 
 typedef CTRexExtendedDriverBase * (*create_object_t) (void);
 
@@ -715,7 +819,8 @@ private:
         register_driver(std::string("net_enic"),CTRexExtendedDriverBaseVIC::create);
         register_driver(std::string("net_mlx5"),CTRexExtendedDriverBaseMlnx5G::create);
         register_driver(std::string("net_mlx4"),CTRexExtendedDriverMlnx4::create);
-        
+        register_driver(std::string("net_ntacc"), CTRexExtendedDriverBaseNtAcc::create);
+
 
         /* virtual devices */
         register_driver(std::string("net_e1000_em"), CTRexExtendedDriverBaseE1000::create);
@@ -844,9 +949,10 @@ enum { OPT_HELP,
        OPT_NO_SCAPY_SERVER,
        OPT_ACTIVE_FLOW,
        OPT_RT,
-       OPT_TCP_MODE,  
+       OPT_TCP_MODE,
        OPT_MLX4_SO,
        OPT_MLX5_SO,
+       OPT_NTACC_SO,
        OPT_TCP_HTTP_RES
 
 };
@@ -909,6 +1015,7 @@ static CSimpleOpt::SOption parser_options[] =
         { OPT_CHECKSUM_OFFLOAD_DISABLE, "--checksum-offload-disable", SO_NONE   },
         { OPT_TSO_OFFLOAD_DISABLE, "--tso-disable", SO_NONE   },
         { OPT_ACTIVE_FLOW,            "--active-flows",   SO_REQ_SEP  },
+        { OPT_NTACC_SO,               "--ntacc-so", SO_NONE    },
         { OPT_MLX5_SO,                "--mlx5-so", SO_NONE    },
         { OPT_MLX4_SO,                "--mlx4-so", SO_NONE    },
         { OPT_CLOSE,                  "--close-at-end",    SO_NONE    },
@@ -916,7 +1023,7 @@ static CSimpleOpt::SOption parser_options[] =
         { OPT_NO_OFED_CHECK,          "--no-ofed-check",   SO_NONE    },
         { OPT_NO_SCAPY_SERVER,        "--no-scapy-server", SO_NONE    },
         { OPT_RT,                     "--rt",              SO_NONE    },
-        { OPT_TCP_MODE,               "--tcp",SO_NONE},
+        { OPT_TCP_MODE,               "--astf",SO_NONE},
         { OPT_TCP_HTTP_RES,           "--http",SO_REQ_SEP},
 
         SO_END_OF_OPTIONS
@@ -931,6 +1038,7 @@ static int usage(){
     printf("\n");
 
     printf(" Available options are:\n");
+    printf(" --astf                     : Enable advanced stateful mode. profile should be in py format and not YAML format \n");
     printf(" --active-flows             : An experimental switch to scale up or down the number of active flows.  \n");
     printf("                              It is not accurate due to the quantization of flow scheduler and in some case does not work. \n");
     printf("                              Example --active-flows 500000 wil set the ballpark of the active flow to be ~0.5M \n");
@@ -1118,6 +1226,10 @@ static int parse_options(int argc, char *argv[], CParserOption* po, bool first_t
                 po->preview.set_rt_prio_mode(true);
                 break;
 
+            case OPT_NTACC_SO:
+                po->preview.set_ntacc_so_mode(true);
+                break;
+
             case OPT_MLX5_SO:
                 po->preview.set_mlx5_so_mode(true);
                 break;
@@ -1141,7 +1253,7 @@ static int parse_options(int argc, char *argv[], CParserOption* po, bool first_t
             case OPT_LEARN_VERIFY :
                 // must configure learn_mode for learn verify to work. If different learn mode will be given later, it will be set instead.
                 if (po->m_learn_mode == 0) {
-                    po->m_learn_mode = CParserOption::LEARN_MODE_TCP_ACK;
+                    po->m_learn_mode = CParserOption::LEARN_MODE_IP_OPTION;
                 }
                 po->preview.set_learn_and_verify_mode_enable(true);
                 break;
@@ -1403,6 +1515,7 @@ static int parse_options(int argc, char *argv[], CParserOption* po, bool first_t
             po->set_tw_levels(lp->m_levels);
         }
     }
+
 
     return 0;
 }
@@ -1674,7 +1787,7 @@ void CPhyEthIF::configure(uint16_t nb_rx_queue,
 void CPhyEthIF::configure_rx_duplicate_rules(){
     if ( get_is_rx_filter_enable() ){
         get_ex_drv()->configure_rx_filter_rules(this);
-    } 
+    }
 }
 
 int CPhyEthIF::set_port_rcv_all(bool is_rcv) {
@@ -2128,8 +2241,12 @@ void dump_hw_state(FILE *fd,struct ixgbe_hw_stats *hs ){
 void CPhyEthIF::set_ignore_stats_base(CPreTestStats &pre_stats) {
     // reading m_stats, so drivers saving prev in m_stats will be updated.
     // Actually, we want m_stats to be cleared
-    get_ex_drv()->get_extended_stats(this, &m_stats);
-
+    
+    /* block until this succeeds */
+    while (!get_extended_stats()) {
+        delay(10);
+    }
+    
     m_ignore_stats.ipackets = m_stats.ipackets;
     m_ignore_stats.ibytes = m_stats.ibytes;
     m_ignore_stats.opackets = m_stats.opackets;
@@ -2291,8 +2408,8 @@ protected:
 
 class CCoreEthIFTcp : public CCoreEthIF {
 public:
-    uint16_t     rx_burst(pkt_dir_t dir, 
-                          struct rte_mbuf **rx_pkts, 
+    uint16_t     rx_burst(pkt_dir_t dir,
+                          struct rte_mbuf **rx_pkts,
                           uint16_t nb_pkts);
 
     virtual int send_node(CGenNode *node);
@@ -2305,7 +2422,7 @@ uint16_t get_client_side_vlan(CVirtualIF * _ifs){
     uint8_t port_id = lp_port->m_port->get_tvpid();
     uint16_t vlan=CGlobalInfo::m_options.m_ip_cfg[port_id].get_vlan();
     return(vlan);
-} 
+}
 
 
 bool CCoreEthIF::Create(uint8_t             core_id,
@@ -2492,8 +2609,8 @@ void CCoreEthIF::send_one_pkt(pkt_dir_t       dir,
     lp_port->m_len = 0;
 }
 
-uint16_t CCoreEthIFTcp::rx_burst(pkt_dir_t dir, 
-                                 struct rte_mbuf **rx_pkts, 
+uint16_t CCoreEthIFTcp::rx_burst(pkt_dir_t dir,
+                                 struct rte_mbuf **rx_pkts,
                                  uint16_t nb_pkts){
     uint16_t res = m_ports[dir].m_port->rx_burst_dq(rx_pkts,nb_pkts);
     return (res);
@@ -2832,14 +2949,14 @@ public:
     }
 
     virtual int tx(rte_mbuf_t *m) {
-        
+
         apply_hw_vlan(m, m_port->get_tvpid());
         return tx_raw(m);
     }
 
-    
+
     virtual int tx_raw(rte_mbuf_t *m) {
-        
+
         rte_mbuf_t *tx_pkts[2];
         tx_pkts[0] = m;
 
@@ -2849,11 +2966,11 @@ public:
             return (-1);
 
         }
-        
+
         return 0;
     }
-        
-    
+
+
     /* nothing special with HW implementation */
     virtual int tx_latency(rte_mbuf_t *m) {
         return tx(m);
@@ -2907,7 +3024,7 @@ public:
     virtual int tx_raw(rte_mbuf_t *m) {
         return tx_common(m, false, false);
     }
-    
+
     virtual int tx_latency(rte_mbuf_t *m) {
         return tx_common(m, true, true);
     }
@@ -2941,7 +3058,7 @@ private:
         if (add_hw_vlan) {
             apply_hw_vlan(m, m_port->get_tvpid());
         }
-        
+
         /* allocate node */
         CGenNodeLatencyPktInfo *node=(CGenNodeLatencyPktInfo * )CGlobalInfo::create_node();
         if (!node) {
@@ -3227,7 +3344,8 @@ void CGlobalStats::DumpAllPorts(FILE *fd){
         fprintf (fd,"\n");
     }
     fprintf (fd," Expected-CPS    : %s  \n",double_to_human_str(m_tx_expected_cps,"cps",KBYE_1000).c_str());
-    fprintf (fd," Expected-BPS    : %s  \n",double_to_human_str(m_tx_expected_bps,"bps",KBYE_1000).c_str());
+    fprintf (fd," Expected-%s : %s  \n", get_is_tcp_mode() ? "L7-BPS" : "BPS   "
+             ,double_to_human_str(m_tx_expected_bps,"bps",KBYE_1000).c_str());
     fprintf (fd,"\n");
     fprintf (fd," Active-flows    : %8llu  Clients : %8llu   Socket-util : %3.4f %%    \n",
              (unsigned long long)m_active_flows,
@@ -3391,7 +3509,7 @@ public:
     void pre_test();
     void abort_gracefully(const std::string &on_stdout,
                           const std::string &on_publisher) __attribute__ ((__noreturn__));
-    
+
     /**
      * mark for shutdown
      * on the next check - the control plane will
@@ -3421,13 +3539,13 @@ private:
         return (m_mark_for_shutdown != SHUTDOWN_NONE);
     }
 
-    
+
     std::string get_shutdown_cause() const {
         switch (m_mark_for_shutdown) {
 
         case SHUTDOWN_NONE:
             return "";
-            
+
         case SHUTDOWN_TEST_ENDED:
             return "test has ended";
 
@@ -3446,10 +3564,10 @@ private:
         default:
             assert(0);
         }
-        
+
     }
-    
-    
+
+
     /**
      * shutdown sequence
      *
@@ -3458,6 +3576,7 @@ private:
 
 public:
     void check_for_dp_messages();
+    int start_master_astf();
     int start_master_statefull();
     int start_master_stateless();
     int run_in_core(virtual_thread_id_t virt_core_id);
@@ -3517,6 +3636,9 @@ public:
     void dump_links_status(FILE *fd);
 
     bool lookup_port_by_mac(const uint8_t *mac, uint8_t &port_id);
+
+    uint16_t get_rx_core_tx_queue_id();
+    uint16_t get_latency_tx_queue_id();
 
 public:
     port_cfg_t  m_port_cfg;
@@ -3733,6 +3855,10 @@ void CGlobalTRex::pre_test() {
 
             // update statistics baseline, so we can ignore what happened in pre test phase
             CPhyEthIF *pif = &m_ports[port_id];
+            // some adapters (napatech at least) have a little delayed statistics
+            if (get_ex_drv()->sleep_after_arp_needed() ){
+                sleep(1);
+            }
             CPreTestStats pre_stats = pretest.get_stats(port_id);
             pif->set_ignore_stats_base(pre_stats);
             // Configure port back to normal mode. Only relevant packets handled by software.
@@ -3759,14 +3885,14 @@ void CGlobalTRex::pre_test() {
             } else if (CGlobalInfo::m_options.m_mac_addr[port_id].u.m_mac.is_set) {
                 m_trex_stateless->get_port_by_id(port_id)->set_l2_mode(dst_mac);
             }
-            
+
             /* configure single VLAN */
             uint16_t vlan = CGlobalInfo::m_options.m_ip_cfg[port_id].get_vlan();
             if (vlan != 0) {
-                
+
                 VLANConfig vlan_cfg;
                 vlan_cfg.set_vlan(vlan);
-                
+
                 m_trex_stateless->get_port_by_id(port_id)->set_vlan_cfg(vlan_cfg);
             }
         }
@@ -3777,13 +3903,13 @@ void CGlobalTRex::pre_test() {
 
 
 /**
- * handle an abort 
- *  
- * when in stateless mode this routine will try to safely 
- * publish over ZMQ the assert cause 
- *  
- * *BEWARE* - this function should be thread safe 
- *            as any thread can call assert 
+ * handle an abort
+ *
+ * when in stateless mode this routine will try to safely
+ * publish over ZMQ the assert cause
+ *
+ * *BEWARE* - this function should be thread safe
+ *            as any thread can call assert
  */
 void
 CGlobalTRex::abort_gracefully(const std::string &on_stdout,
@@ -3791,23 +3917,23 @@ CGlobalTRex::abort_gracefully(const std::string &on_stdout,
 
     /* first to stdout */
     std::cout << on_stdout << "\n";
-    
+
     /* assert might be before the ZMQ publisher was connected */
     if (m_zmq_publisher.is_connected()) {
-    
+
         /* generate the data */
         Json::Value data;
         data["cause"] = on_publisher;
-    
+
         /* if this is the control plane thread - acquire the lock again (recursive), if it is dataplane - hold up */
-        std::unique_lock<std::recursive_mutex> cp_lock(m_cp_lock);        
+        std::unique_lock<std::recursive_mutex> cp_lock(m_cp_lock);
         m_zmq_publisher.publish_event(TrexPublisher::EVENT_SERVER_STOPPED, data);
-    
+
         /* close the publisher gracefully to ensure message was delivered */
         m_zmq_publisher.Delete(2);
     }
-    
-    
+
+
     /* so long... */
     abort();
 }
@@ -3900,7 +4026,7 @@ void CGlobalTRex::try_stop_all_cores(){
         data["cause"] = get_shutdown_cause();
         m_zmq_publisher.publish_event(TrexPublisher::EVENT_SERVER_STOPPED, data);
         printf(" All cores stopped !! \n");
-        
+
     }else{
         printf(" ERROR one of the DP core is stucked !\n");
     }
@@ -3968,7 +4094,7 @@ void CGlobalTRex::rx_stf_conf(void) {
             CNodeRing * r = rx_dp->getRingCpToDp(thread_id);
             bool disable_rx_read=get_is_tcp_mode(); /* TBD need to fix this as main read all packets */
             if (disable_rx_read){
-                printf("WARNING TCP feature with latency is not supported with virtual interfaces for now \n"); 
+                printf("WARNING TCP feature with latency is not supported with virtual interfaces for now \n");
             }
             m_latency_vm_vports[i].Create((uint8_t)i, r, &m_mg, _if,disable_rx_read);
 
@@ -4007,7 +4133,7 @@ void CGlobalTRex::rx_sl_configure(void) {
             CNodeRing * r = rx_dp->getRingCpToDp(thread_id);
             m_latency_vm_vports[i].Create(i, r, &m_mg, _if,false);
             rx_sl_cfg.m_ports[i] = &m_latency_vm_vports[i];
-            
+
         }
     } else {
         for (i = 0; i < m_max_ports; i++) {
@@ -4026,7 +4152,7 @@ int  CGlobalTRex::ixgbe_start(void){
         socket_id_t socket_id = CGlobalInfo::m_socket.port_to_socket((port_id_t)i);
         assert(CGlobalInfo::m_mem_pool[socket_id].m_mbuf_pool_2048);
         CPhyEthIF * _if=&m_ports[i];
-        _if->Create((uint8_t)i,CTVPort(i).get_repid()); 
+        _if->Create((uint8_t)i,CTVPort(i).get_repid());
         _if->conf_queues();
         _if->stats_clear();
         _if->start();
@@ -4083,7 +4209,7 @@ int  CGlobalTRex::ixgbe_start(void){
     if (CGlobalInfo::get_queues_mode() == CGlobalInfo::Q_MODE_ONE_QUEUE) {
         lat_q_id = 0;
     } else {
-        lat_q_id = get_cores_tx() / get_base_num_cores() + 1;
+        lat_q_id = get_latency_tx_queue_id();
     }
     for (i=0; i<get_cores_tx(); i++) {
         int j=(i+1);
@@ -4150,10 +4276,15 @@ bool CGlobalTRex::Create(){
 
     m_stats_cnt =0;
     if (!get_is_stateless()) {
-        pre_yaml_info.load_from_yaml_file(CGlobalInfo::m_options.cfg_file);
-        if ( CGlobalInfo::m_options.preview.getVMode() > 0){
-            CGlobalInfo::m_options.dump(stdout);
-            CGlobalInfo::m_memory_cfg.Dump(stdout);
+
+        if ( get_is_tcp_mode() ){
+            pre_yaml_info.m_vlan_info.m_enable =false;
+        }else{
+            pre_yaml_info.load_from_yaml_file(CGlobalInfo::m_options.cfg_file);
+            if ( CGlobalInfo::m_options.preview.getVMode() > 0){
+                CGlobalInfo::m_options.dump(stdout);
+                CGlobalInfo::m_memory_cfg.Dump(stdout);
+            }
         }
     }
 
@@ -4381,6 +4512,52 @@ void CGlobalTRex::dump_links_status(FILE *fd){
     }
 }
 
+uint16_t CGlobalTRex::get_rx_core_tx_queue_id(){
+    /* 2 spare tx queues per port 
+      X is the number of dual_ports  0--x-1 for DP
+      
+    
+       stateless 
+       x+0 - DP
+       x+1 - rx core ARPs 
+       x+2 - low latency 
+
+       STL/ASTF
+
+       x+0 - DP
+       x+1 - not used 
+       x+2 - rx core, latency 
+   */
+
+    if (get_is_stateless()) {
+        return (m_cores_to_dual_ports);
+    }
+    return(m_cores_to_dual_ports+1);
+}
+
+uint16_t CGlobalTRex::get_latency_tx_queue_id(){
+    /* 2 spare tx queues per port 
+      X is the number of dual_ports  0--x-1 for DP
+
+
+       stateless 
+       x+0 - DP
+       x+1 - rx core ARPs 
+       x+2 - low latency 
+
+       STL/ASTF
+
+       x+0 - DP
+       x+1 - not used 
+       x+2 - rx core, latency 
+   */
+    if (get_is_stateless()) {
+        return (m_cores_to_dual_ports+1);
+    }
+    return (CCoreEthIF::INVALID_Q_ID);
+}
+
+
 bool CGlobalTRex::lookup_port_by_mac(const uint8_t *mac, uint8_t &port_id) {
     for (int i = 0; i < m_max_ports; i++) {
         if (memcmp(m_ports[i].get_port_attr()->get_layer_cfg().get_ether().get_src(), mac, 6) == 0) {
@@ -4572,7 +4749,7 @@ void CGlobalTRex::get_stats(CGlobalStats & stats){
         stats.m_rx_cpu_util = m_rx_sl.get_cpu_util();
         stats.m_rx_core_pps = m_rx_sl.get_rx_pps_rate();
     }
-    
+
     stats.m_threads      = m_fl.m_threads_info.size();
 
     for (i=0; i<m_max_ports; i++) {
@@ -4725,6 +4902,14 @@ void CGlobalTRex::get_stats(CGlobalStats & stats){
     else
         stats.m_bw_per_core   = 2*(stats.m_tx_bps/1e9)*100.0/(stats.m_cpu_util*stats.m_threads);
 
+#if 0
+    if ((m_expected_cps == 0) && get_is_tcp_mode()) {
+        // In astf mode, we know the info only after doing first get of data from json (which triggers analyzing the data)
+        m_expected_cps = CJsonData::instance()->get_expected_cps();
+        m_expected_bps = CJsonData::instance()->get_expected_bps();
+    }
+#endif
+
     stats.m_tx_expected_cps        = m_expected_cps*pf;
     stats.m_tx_expected_pps        = m_expected_pps*pf;
     stats.m_tx_expected_bps        = m_expected_bps*pf;
@@ -4772,6 +4957,10 @@ bool CGlobalTRex::sanity_check(){
 void CGlobalTRex::dump_template_info(std::string & json){
     CFlowGenListPerThread   * lpt = m_fl.m_threads_info[0];
     CFlowsYamlInfo * yaml_info=&lpt->m_yaml_info;
+    if ( yaml_info->is_any_template()==false){ 
+        json="";
+        return;
+    }
 
     json="{\"name\":\"template_info\",\"type\":0,\"data\":[";
     int i;
@@ -4846,7 +5035,9 @@ CGlobalTRex::publish_async_data(bool sync_now, bool baseline) {
 
     if ( !get_is_stateless() ){
         dump_template_info(json);
-        m_zmq_publisher.publish_json(json);
+        if (json != ""){
+            m_zmq_publisher.publish_json(json);
+        }
     }
 
     if ( get_is_rx_check_mode() ) {
@@ -4862,7 +5053,7 @@ CGlobalTRex::publish_async_data(bool sync_now, bool baseline) {
     m_mg.dump_json_v2(json );
     m_zmq_publisher.publish_json(json);
 
-    if (get_is_tcp_mode()){ 
+    if (get_is_tcp_mode()){
         CSTTCp   * lpstt=m_fl.m_stt_cp;
         if (lpstt) {
             //if ( m_stats_cnt%4==0) { /* could be significat, reduce the freq */
@@ -5055,15 +5246,15 @@ CGlobalTRex::handle_fast_path() {
  */
 void CGlobalTRex::shutdown() {
     std::stringstream ss;
-    
+
     assert(is_marked_for_shutdown());
-    
+
     ss << " *** TRex is shutting down - cause: '";
 
     ss << get_shutdown_cause();
-    
+
     ss << "'";
-    
+
     /* report */
     std::cout << ss.str() << "\n";
 
@@ -5279,6 +5470,14 @@ int CGlobalTRex::stop_master(){
 
     dump_stats(stdout,CGlobalStats::dmpSTANDARD);
     dump_post_test_stats(stdout);
+
+    if (get_is_tcp_mode()) {
+        CSTTCp   * lpstt=m_fl.m_stt_cp;
+        assert(lpstt);
+        assert(lpstt->m_init);
+        lpstt->DumpTable();
+    }
+
     publish_async_data(false);
 
     return (0);
@@ -5315,10 +5514,62 @@ int CGlobalTRex::start_master_stateless(){
         lpt = m_fl.m_threads_info[i];
         CVirtualIF * erf_vif = m_cores_vif[i+1];
         lpt->set_vif(erf_vif);
-        
+
     }
     m_fl_was_init=true;
 
+    return (0);
+}
+
+int CGlobalTRex::start_master_astf() {
+    int i;
+    for (i=0; i<BP_MAX_CORES; i++) {
+        m_signal[i]=0;
+    }
+    m_fl.Create();
+    m_fl.load_astf();
+    /* verify options */
+    try {
+        CGlobalInfo::m_options.verify();
+    } catch (const std::runtime_error &e) {
+        std::cout << "\n*** " << e.what() << "\n\n";
+        exit(-1);
+    }
+
+    std::string json_file_name = "/tmp/astf";
+    if (CGlobalInfo::m_options.prefix.size() != 0) {
+        json_file_name += "-" + CGlobalInfo::m_options.prefix;
+    }
+    json_file_name += ".json";
+
+    fprintf(stdout, "Using json file %s\n", json_file_name.c_str());
+
+    /* load json */
+    if (! CJsonData::instance()->parse_file(json_file_name) ) {
+       exit(-1);
+    }
+
+    m_expected_pps = 0; // Can't know this in astf mode.
+    // two below are computed later. Need to do this after analyzing data read from json.
+    m_expected_cps = 0;
+    m_expected_bps = 0;
+
+    CTcpLatency lat;
+    CJsonData::instance()->get_latency_params(lat);
+
+    m_mg.set_ip( lat.get_c_ip() ,
+                 lat.get_s_ip(),
+                 lat.get_mask());
+
+    m_fl.generate_p_thread_info(get_cores_tx());
+    CFlowGenListPerThread   * lpt;
+
+    for (i=0; i<get_cores_tx(); i++) {
+        lpt = m_fl.m_threads_info[i];
+        CVirtualIF * erf_vif = m_cores_vif[i+1];
+        lpt->set_vif(erf_vif);
+    }
+    m_fl_was_init=true;
     return (0);
 }
 
@@ -5329,12 +5580,11 @@ int CGlobalTRex::start_master_statefull() {
     }
 
     m_fl.Create();
-    m_fl.load_from_yaml(CGlobalInfo::m_options.cfg_file,get_cores_tx());
 
+    m_fl.load_from_yaml(CGlobalInfo::m_options.cfg_file,get_cores_tx());
     if ( CGlobalInfo::m_options.m_active_flows>0 ) {
         m_fl.update_active_flows(CGlobalInfo::m_options.m_active_flows);
     }
-
     /* client config */
     if (CGlobalInfo::m_options.client_cfg_file != "") {
         try {
@@ -5347,6 +5597,8 @@ int CGlobalTRex::start_master_statefull() {
         m_fl.set_client_config_tuple_gen_info(&m_fl.m_yaml_info.m_tuple_gen);
         pre_test();
     }
+
+
 
     /* verify options */
     try {
@@ -5366,21 +5618,21 @@ int CGlobalTRex::start_master_statefull() {
 
     CTupleGenYamlInfo * tg=&m_fl.m_yaml_info.m_tuple_gen;
 
-    
+
     /* for client cluster configuration - pass the IP start entry */
     if (CGlobalInfo::m_options.preview.get_is_client_cfg_enable()) {
-        
+
         m_mg.set_ip( tg->m_client_pool[0].get_ip_start(),
                      tg->m_server_pool[0].get_ip_start(),
                      tg->m_client_pool[0].getDualMask(),
                      m_fl.m_client_config_info);
     } else {
-        
+
         m_mg.set_ip( tg->m_client_pool[0].get_ip_start(),
                      tg->m_server_pool[0].get_ip_start(),
                      tg->m_client_pool[0].getDualMask());
     }
-    
+
 
     if (  CGlobalInfo::m_options.preview.getVMode() >0 ) {
         m_fl.DumpCsv(stdout);
@@ -5441,7 +5693,7 @@ void CPhyEthIF::conf_queues() {
             // no drop q. Many rcv queues. RSS mode.
             // rss on all rcv queues. Do not skip any q.
             configure_rss_redirect_table(dpdk_p.rx_data_q_num, 0xff);
-            g_trex.m_rx_core_tx_q_id = g_trex.m_cores_to_dual_ports;
+            g_trex.m_rx_core_tx_q_id = g_trex.get_rx_core_tx_queue_id();
             for (int queue = 0; queue < dpdk_p.rx_data_q_num; queue++) {
                 rx_queue_setup(queue, dpdk_p.rx_desc_num_data_q, socket_id,
                                &g_trex.m_port_cfg.m_rx_conf, get_ex_drv()->get_rx_mem_pool(socket_id));
@@ -5451,7 +5703,7 @@ void CPhyEthIF::conf_queues() {
     case 1:
         // 1 drop q. 1 or more rx queues. Normal mode.
         // rx core will use largest tx q
-        g_trex.m_rx_core_tx_q_id = g_trex.m_cores_to_dual_ports;
+        g_trex.m_rx_core_tx_q_id = g_trex.get_rx_core_tx_queue_id();
         // configure drop q
 
         drop_p = CGlobalInfo::m_mem_pool[socket_id].m_mbuf_pool_2048;
@@ -5459,21 +5711,21 @@ void CPhyEthIF::conf_queues() {
             drop_p = get_ex_drv()->get_rx_mem_pool(socket_id);
         }
 
-        rx_queue_setup(MAIN_DPDK_DROP_Q, 
-                       dpdk_p.rx_desc_num_drop_q, 
-                       socket_id, 
+        rx_queue_setup(MAIN_DPDK_DROP_Q,
+                       dpdk_p.rx_desc_num_drop_q,
+                       socket_id,
                        &g_trex.m_port_cfg.m_rx_conf,
                        drop_p);
         set_rx_queue(MAIN_DPDK_RX_Q);
-        rx_queue_setup(MAIN_DPDK_RX_Q, 
-                       dpdk_p.rx_desc_num_data_q, 
+        rx_queue_setup(MAIN_DPDK_RX_Q,
+                       dpdk_p.rx_desc_num_data_q,
                        socket_id,
-                       &g_trex.m_port_cfg.m_rx_conf, 
+                       &g_trex.m_port_cfg.m_rx_conf,
                        get_ex_drv()->get_rx_mem_pool(socket_id));
         break;
     default:
         // Many drop queues. Mellanox mode.
-        g_trex.m_rx_core_tx_q_id = g_trex.m_cores_to_dual_ports;
+        g_trex.m_rx_core_tx_q_id = g_trex.get_rx_core_tx_queue_id();
         // configure drop queues (all queues but MAIN_DPDK_RX_Q)
         for (int j = 0; j < dpdk_p.rx_drop_q_num + 1; j++) {
             if (j == MAIN_DPDK_RX_Q) {
@@ -5485,7 +5737,7 @@ void CPhyEthIF::conf_queues() {
         rx_queue_setup(MAIN_DPDK_RX_Q, dpdk_p.rx_desc_num_data_q, socket_id,
                        &g_trex.m_port_cfg.m_rx_conf, get_ex_drv()->get_rx_mem_pool(socket_id));
         // rss on all drop queues. Skip MAIN_DPDK_RX_Q
-        configure_rss_redirect_table(dpdk_p.rx_drop_q_num + 1, 
+        configure_rss_redirect_table(dpdk_p.rx_drop_q_num + 1,
                                      MAIN_DPDK_RX_Q);
         break;
     }
@@ -5495,7 +5747,7 @@ void CPhyEthIF::conf_queues() {
     if ( get_is_tcp_mode() ) {
       if ( get_ex_drv()->is_hardware_default_rss() ){
           /* redirect it to queue zero */
-          configure_rss_redirect_table(MAIN_DPDK_RX_Q+1, 
+          configure_rss_redirect_table(MAIN_DPDK_RX_Q+1,
                                        MAIN_DPDK_RX_Q);
       }
     }
@@ -5547,8 +5799,30 @@ int CPhyEthIF::configure_rss_redirect_table(uint16_t numer_of_queues, uint16_t s
 #endif
 }
 
+/**
+ * get extended stats might fail on some drivers (i40e_vf) 
+ * so wrap it another a watch 
+ */
+bool CPhyEthIF::get_extended_stats() {
+    bool rc = get_ex_drv()->get_extended_stats(this, &m_stats);
+    if (!rc) {
+        m_stats_err_cnt++;
+        assert(m_stats_err_cnt <= 5);
+        return false;
+    }
+    
+    /* clear the counter */
+    m_stats_err_cnt = 0;
+    return true;
+}
+
+
 void CPhyEthIF::update_counters() {
-    get_ex_drv()->get_extended_stats(this, &m_stats);
+    bool rc = get_extended_stats();
+    if (!rc) {
+        return;
+    }
+    
     CRXCoreIgnoreStat ign_stats;
 
     if (get_is_stateless()) {
@@ -5577,7 +5851,7 @@ bool CPhyEthIF::Create(tvpid_t  tvpid,
     m_last_rx_rate      = 0.0;
     m_last_tx_rate      = 0.0;
     m_last_tx_pps       = 0.0;
-    
+
     m_port_attr    = g_trex.m_drv->create_port_attr(tvpid,repid);
 
     /* set src MAC addr */
@@ -5696,11 +5970,11 @@ TrexStateless * get_stateless_obj() {
 
 /**
  * handles an abort
- * 
+ *
  */
 void abort_gracefully(const std::string &on_stdout,
                       const std::string &on_publisher) {
-    
+
     g_trex.abort_gracefully(on_stdout, on_publisher);
 }
 
@@ -5957,6 +6231,12 @@ int  update_dpdk_args(void){
     SET_ARGS((char *)"xx");
     CPreviewMode *lpp=&CGlobalInfo::m_options.preview;
 
+    if ( lpp->get_ntacc_so_mode() ){
+        SET_ARGS("-d");
+        snprintf(g_ntacc_so_id_str, sizeof(g_ntacc_so_id_str), "libntacc-64%s.so",g_image_postfix );
+        SET_ARGS(g_ntacc_so_id_str);
+    }
+
     if ( lpp->get_mlx5_so_mode() ){
         SET_ARGS("-d");
         snprintf(g_mlx5_so_id_str, sizeof(g_mlx5_so_id_str), "libmlx5-64%s.so",g_image_postfix );
@@ -6168,9 +6448,9 @@ int main_test(int argc , char * argv[]){
         CParserOption * po=&CGlobalInfo::m_options;
 
         if ( po->preview.getCores() >1 ) {
-           printf("ERROR advanced stateful does not support more than 1 DP core per dual ports for now  \n");
-           printf("we are working to solve this very soon  \n");
-           return (-1);
+        printf("ERROR advanced stateful does not support more than 1 DP core per dual ports for now  \n");
+        printf("we are working to solve this very soon  \n");
+        return (-1);
         }
 
         if ( po->preview.get_is_rx_check_enable() ){
@@ -6250,7 +6530,11 @@ int main_test(int argc , char * argv[]){
         g_trex.start_master_stateless();
 
     }else{
-        g_trex.start_master_statefull();
+        if (get_is_tcp_mode()) {
+            g_trex.start_master_astf();
+        }else{
+            g_trex.start_master_statefull();
+        }
     }
 
     // For unit testing of HW rules and queues configuration. Just send some packets and exit.
@@ -6427,7 +6711,7 @@ void set_driver() {
 
 /*
 
- map requested ports to rte_eth scan 
+ map requested ports to rte_eth scan
 
 */
 void reorder_dpdk_ports() {
@@ -6492,10 +6776,21 @@ CFlowStatParser *CTRexExtendedDriverBase::get_flow_stat_parser() {
     return parser;
 }
 
-void CTRexExtendedDriverBase::get_extended_stats_fixed(CPhyEthIF * _if, CPhyEthIFStats *stats, int fix_i, int fix_o) {
+bool CTRexExtendedDriverBase::get_extended_stats_fixed(CPhyEthIF * _if, CPhyEthIFStats *stats, int fix_i, int fix_o) {
     struct rte_eth_stats stats1;
     struct rte_eth_stats *prev_stats = &stats->m_prev_stats;
+    
+    /* clear the error flag */
+    stats1.err_flag = 0;
+    
+    /* fetch stats */
     rte_eth_stats_get(_if->get_repid(), &stats1);
+    
+    /* check the error flag */
+    if (stats1.err_flag) {
+        /* error (might happen on i40e_vf ) */
+        return false;
+    }
 
     stats->ipackets   += stats1.ipackets - prev_stats->ipackets;
     // Some drivers report input byte counts without Ethernet FCS (4 bytes), we need to fix the reported numbers
@@ -6519,6 +6814,8 @@ void CTRexExtendedDriverBase::get_extended_stats_fixed(CPhyEthIF * _if, CPhyEthI
     prev_stats->oerrors = stats1.oerrors;
     prev_stats->ierrors = stats1.ierrors;
     prev_stats->rx_nombuf = stats1.rx_nombuf;
+    
+    return true;
 }
 
 // in 1G we need to wait if links became ready to soon
@@ -6762,7 +7059,7 @@ int CTRexExtendedDriverBase1G::set_rcv_all(CPhyEthIF * _if, bool set_on) {
     return 0;
 }
 
-void CTRexExtendedDriverBase1G::get_extended_stats(CPhyEthIF * _if,CPhyEthIFStats *stats){
+bool CTRexExtendedDriverBase1G::get_extended_stats(CPhyEthIF * _if,CPhyEthIFStats *stats){
 
     stats->ipackets     +=  _if->pci_reg_read(E1000_GPRC) ;
 
@@ -6798,6 +7095,8 @@ void CTRexExtendedDriverBase1G::get_extended_stats(CPhyEthIF * _if,CPhyEthIFStat
     stats->oerrors      +=  0;
     stats->imcasts      =  0;
     stats->rx_nombuf    =  0;
+    
+    return true;
 }
 
 void CTRexExtendedDriverBase1G::clear_extended_stats(CPhyEthIF * _if){
@@ -7012,7 +7311,7 @@ int CTRexExtendedDriverBase10G::set_rcv_all(CPhyEthIF * _if, bool set_on) {
     return res;
 }
 
-void CTRexExtendedDriverBase10G::get_extended_stats(CPhyEthIF * _if,CPhyEthIFStats *stats){
+bool CTRexExtendedDriverBase10G::get_extended_stats(CPhyEthIF * _if,CPhyEthIFStats *stats){
 
     int i;
     uint64_t t=0;
@@ -7048,6 +7347,7 @@ void CTRexExtendedDriverBase10G::get_extended_stats(CPhyEthIF * _if,CPhyEthIFSta
     stats->imcasts      =  0;
     stats->rx_nombuf    =  0;
 
+    return true;
 }
 
 int CTRexExtendedDriverBase10G::wait_for_stable_link(){
@@ -7348,8 +7648,8 @@ int CTRexExtendedDriverBase40G::dump_fdir_global_stats(CPhyEthIF * _if, FILE *fd
     }
 }
 
-void CTRexExtendedDriverBase40G::get_extended_stats(CPhyEthIF * _if,CPhyEthIFStats *stats) {
-    get_extended_stats_fixed(_if, stats, 0, 4);
+bool CTRexExtendedDriverBase40G::get_extended_stats(CPhyEthIF * _if,CPhyEthIFStats *stats) {
+    return get_extended_stats_fixed(_if, stats, 0, 4);
 }
 
 int CTRexExtendedDriverBase40G::wait_for_stable_link(){
@@ -7393,7 +7693,7 @@ CFlowStatParser *CTRexExtendedDriverBase40G::get_flow_stat_parser() {
 int CTRexExtendedDriverBase40G::set_rcv_all(CPhyEthIF * _if, bool set_on) {
 
     repid_t repid=_if->get_repid();
-    
+
     enum rte_filter_op op = set_on ? RTE_ETH_FILTER_ADD : RTE_ETH_FILTER_DELETE;
 
     add_del_eth_type_rule(repid, op, EthernetHeader::Protocol::ARP);
@@ -7582,8 +7882,8 @@ int CTRexExtendedDriverBaseMlnx5G::dump_fdir_global_stats(CPhyEthIF * _if, FILE 
     }
 }
 
-void CTRexExtendedDriverBaseMlnx5G::get_extended_stats(CPhyEthIF * _if,CPhyEthIFStats *stats){
-        get_extended_stats_fixed(_if, stats, 4, 4);
+bool CTRexExtendedDriverBaseMlnx5G::get_extended_stats(CPhyEthIF * _if,CPhyEthIFStats *stats){
+    return get_extended_stats_fixed(_if, stats, 4, 4);
 }
 
 int CTRexExtendedDriverBaseMlnx5G::wait_for_stable_link(){
@@ -7720,9 +8020,9 @@ void CTRexExtendedDriverBaseVIC::clear_extended_stats(CPhyEthIF * _if){
     rte_eth_stats_reset(repid);
 }
 
-void CTRexExtendedDriverBaseVIC::get_extended_stats(CPhyEthIF * _if,CPhyEthIFStats *stats) {
+bool CTRexExtendedDriverBaseVIC::get_extended_stats(CPhyEthIF * _if,CPhyEthIFStats *stats) {
     // In VIC, we need to reduce 4 bytes from the amount reported for each incoming packet
-    get_extended_stats_fixed(_if, stats, -4, 0);
+    return get_extended_stats_fixed(_if, stats, -4, 0);
 }
 
 int CTRexExtendedDriverBaseVIC::verify_fw_ver(tvpid_t   tvpid) {
@@ -7788,6 +8088,153 @@ CFlowStatParser *CTRexExtendedDriverBaseVIC::get_flow_stat_parser() {
 }
 
 
+//////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////
+/* NTACC */
+
+void CTRexExtendedDriverBaseNtAcc::update_configuration(port_cfg_t * cfg){
+    cfg->m_tx_conf.tx_thresh.pthresh = TX_PTHRESH;
+    cfg->m_tx_conf.tx_thresh.hthresh = TX_HTHRESH;
+    cfg->m_tx_conf.tx_thresh.wthresh = TX_WTHRESH;
+    cfg->m_port_conf.rxmode.max_rx_pkt_len =9000;
+}
+
+CTRexExtendedDriverBaseNtAcc::~CTRexExtendedDriverBaseNtAcc() {
+    struct fid_s *fid, *tfid;
+    TAILQ_FOREACH_SAFE(fid, &lh_fid, leTQ, tfid) {
+        TAILQ_REMOVE(&lh_fid, fid, leTQ);
+        ntacc_del_rules(fid->port_id, fid->rte_flow);
+        free(fid);
+    }
+}
+
+void CTRexExtendedDriverBaseNtAcc::add_del_rules(enum rte_filter_op op, uint8_t port_id, uint16_t type,
+    uint8_t l4_proto, int queue, uint32_t f_id, char *ntpl_str) {
+    int ret=rte_eth_dev_filter_supported(port_id, RTE_ETH_FILTER_GENERIC);
+    if ( ret != 0 ){
+        rte_exit(EXIT_FAILURE, "rte_eth_dev_filter_supported "
+                 "err=%d, port=%u \n",
+                 ret, port_id);
+    }
+
+    // rte_flow.h cannot be included from C++ so we need to call a NtAcc specific C function.
+    if (op == RTE_ETH_FILTER_ADD) {
+        void *rte_flow = ntacc_add_rules(port_id, type, l4_proto, queue, ntpl_str);
+
+        if (rte_flow == NULL) {
+            rte_exit(EXIT_FAILURE, "Failed to add RTE_FLOW\n");
+        }
+
+        fid_s *fid = (fid_s*)malloc(sizeof(fid_s));
+        if (fid == NULL) {
+            rte_exit(EXIT_FAILURE, "Failed to allocate memory\n");
+        }
+
+        fid->id = f_id;
+        fid->port_id = port_id;
+        fid->rte_flow = rte_flow;
+        TAILQ_INSERT_TAIL(&lh_fid, fid, leTQ);
+    } else {
+        fid_s *fid, *tfid;
+        TAILQ_FOREACH_SAFE(fid, &lh_fid, leTQ, tfid) {
+            if ((fid->id == f_id) && (fid->port_id == port_id)){
+                TAILQ_REMOVE(&lh_fid, fid, leTQ);
+                ntacc_del_rules(port_id, fid->rte_flow);
+                free(fid);
+            }
+        }
+    }
+}
+
+int CTRexExtendedDriverBaseNtAcc::add_del_eth_type_rule(uint8_t port_id, enum rte_filter_op op, uint16_t eth_type) {
+    int ret=rte_eth_dev_filter_supported(port_id, RTE_ETH_FILTER_GENERIC);
+
+    if ( ret != 0 ){
+        rte_exit(EXIT_FAILURE, "rte_eth_dev_filter_supported "
+                 "err=%d, port=%u \n",
+                 ret, port_id);
+    }
+    return ret;
+}
+
+int CTRexExtendedDriverBaseNtAcc::configure_rx_filter_rules_stateless(CPhyEthIF * _if) {
+    set_rcv_all(_if, false);
+    repid_t port_id =_if->get_repid();
+
+#if 0
+    // Enable this when all NICs have rte_flow support
+    add_del_rules(RTE_ETH_FILTER_ADD, port_id, RTE_ETH_FLOW_NONFRAG_IPV4_OTHER, 1, MAIN_DPDK_RX_Q, 0, NULL);
+    add_del_rules(RTE_ETH_FILTER_ADD, port_id, RTE_ETH_FLOW_NONFRAG_IPV4_OTHER, 6, MAIN_DPDK_RX_Q, 0, NULL);
+    add_del_rules(RTE_ETH_FILTER_ADD, port_id, RTE_ETH_FLOW_NONFRAG_IPV4_OTHER, 17, MAIN_DPDK_RX_Q, 0, NULL);
+    add_del_rules(RTE_ETH_FILTER_ADD, port_id, RTE_ETH_FLOW_NONFRAG_IPV4_OTHER, 132, MAIN_DPDK_RX_Q, 0, NULL);
+    add_del_rules(RTE_ETH_FILTER_ADD, port_id, RTE_ETH_FLOW_NONFRAG_IPV6_OTHER, 1, MAIN_DPDK_RX_Q, 0, NULL);
+    add_del_rules(RTE_ETH_FILTER_ADD, port_id, RTE_ETH_FLOW_NONFRAG_IPV6_OTHER, 6, MAIN_DPDK_RX_Q, 0, NULL);
+    add_del_rules(RTE_ETH_FILTER_ADD, port_id, RTE_ETH_FLOW_NONFRAG_IPV6_OTHER, 17, MAIN_DPDK_RX_Q, 0, NULL);
+    add_del_rules(RTE_ETH_FILTER_ADD, port_id, RTE_ETH_FLOW_NONFRAG_IPV6_OTHER, 132, MAIN_DPDK_RX_Q, 0, NULL);
+#else
+    // Not all NICs have proper rte_flow support. use the Napatech Filter Language for now.
+    char ntpl_str[] =
+        "((Data[DynOffset = DynOffIpv4Frame; Offset = 1; DataType = ByteStr1 ; DataMask = [0:0]] == 1) OR "
+        " (Data[DynOffset = DynOffIpv6Frame; Offset = 0; DataType = ByteStr2 ; DataMask = [11:11]] == 1)) AND "
+        "Layer4Protocol == ICMP,UDP,TCP,SCTP";
+    add_del_rules(RTE_ETH_FILTER_ADD, port_id, RTE_ETH_FLOW_NTPL, 0, MAIN_DPDK_RX_Q, 0, ntpl_str);
+#endif
+    return 0;
+}
+
+
+int CTRexExtendedDriverBaseNtAcc::set_rcv_all(CPhyEthIF * _if, bool set_on) {
+    repid_t port_id =_if->get_repid();
+    add_del_rules(set_on == true ? RTE_ETH_FILTER_ADD : RTE_ETH_FILTER_DELETE,
+        port_id, RTE_ETH_FLOW_RAW, 0, MAIN_DPDK_RX_Q, 1, NULL);
+    return 0;
+}
+
+void CTRexExtendedDriverBaseNtAcc::clear_extended_stats(CPhyEthIF * _if){
+    rte_eth_stats_reset(_if->get_repid());
+}
+
+bool CTRexExtendedDriverBaseNtAcc::get_extended_stats(CPhyEthIF * _if,CPhyEthIFStats *stats) {
+    return get_extended_stats_fixed(_if, stats, 0, 0);
+}
+
+int CTRexExtendedDriverBaseNtAcc::verify_fw_ver(int port_id) {
+    return 0;
+}
+
+int CTRexExtendedDriverBaseNtAcc::configure_rx_filter_rules(CPhyEthIF * _if) {
+    if (get_is_stateless()) {
+        /* Statefull currently work as stateless */
+        return configure_rx_filter_rules_stateless(_if);
+    } else {
+        return configure_rx_filter_rules_stateless(_if);
+    }
+}
+
+void CTRexExtendedDriverBaseNtAcc::reset_rx_stats(CPhyEthIF * _if, uint32_t *stats, int min, int len) {
+}
+
+int CTRexExtendedDriverBaseNtAcc::get_rx_stats(CPhyEthIF * _if, uint32_t *pkts, uint32_t *prev_pkts
+                                             ,uint32_t *bytes, uint32_t *prev_bytes, int min, int max) {
+  //TODO:
+  return 0;
+}
+
+// if fd != NULL, dump fdir stats of _if
+// return num of filters
+int CTRexExtendedDriverBaseNtAcc::dump_fdir_global_stats(CPhyEthIF * _if, FILE *fd)
+{
+ return (0);
+}
+
+CFlowStatParser *CTRexExtendedDriverBaseNtAcc::get_flow_stat_parser() {
+    CFlowStatParser *parser = new CFlowStatParser(CFlowStatParser::FLOW_STAT_PARSER_MODE_HW);
+    assert (parser);
+    return parser;
+}
+
+
+
 /////////////////////////////////////////////////////////////////////////////////////
 void CTRexExtendedDriverVirtBase::update_configuration(port_cfg_t * cfg) {
     cfg->m_tx_conf.tx_thresh.pthresh = TX_PTHRESH_1G;
@@ -7832,16 +8279,16 @@ void CTRexExtendedDriverVirtio::update_configuration(port_cfg_t * cfg){
 }
 
 
-void CTRexExtendedDriverVirtio::get_extended_stats(CPhyEthIF * _if,CPhyEthIFStats *stats) {
-    get_extended_stats_fixed(_if, stats, 4, 4);
+bool CTRexExtendedDriverVirtio::get_extended_stats(CPhyEthIF * _if,CPhyEthIFStats *stats) {
+    return get_extended_stats_fixed(_if, stats, 4, 4);
 }
 
-void CTRexExtendedDriverVmxnet3::get_extended_stats(CPhyEthIF * _if,CPhyEthIFStats *stats) {
-    get_extended_stats_fixed(_if, stats, 4, 4);
+bool CTRexExtendedDriverVmxnet3::get_extended_stats(CPhyEthIF * _if,CPhyEthIFStats *stats) {
+    return get_extended_stats_fixed(_if, stats, 4, 4);
 }
 
-void CTRexExtendedDriverBaseE1000::get_extended_stats(CPhyEthIF * _if,CPhyEthIFStats *stats){
-    get_extended_stats_fixed(_if, stats, 0, 4);
+bool CTRexExtendedDriverBaseE1000::get_extended_stats(CPhyEthIF * _if,CPhyEthIFStats *stats){
+    return get_extended_stats_fixed(_if, stats, 0, 4);
 }
 
 void CTRexExtendedDriverBaseE1000::update_configuration(port_cfg_t * cfg) {

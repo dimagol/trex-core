@@ -531,11 +531,13 @@ public:
 static inline uint16_t fast_csum(const void *iph, unsigned int ihl) {
     const uint16_t *ipv4 = (const uint16_t *)iph;
 
-    int sum = 0;
+    uint32_t sum = 0;
     for (int i = 0; i < (ihl >> 1); i++) {
         sum += ipv4[i];
     }
 
+    /* two folds are required */
+    sum = (sum & 0xffff) + (sum >> 16);
     sum = (sum & 0xffff) + (sum >> 16);
 
     return (uint16_t)(~sum);
@@ -1103,6 +1105,7 @@ public:
     enum {
         L4_TYPE_UDP = 11,
         L4_TYPE_TCP = 13,
+        L4_TYPE_IP  = 17
 
     }; /* for flags */
 
@@ -1791,6 +1794,16 @@ private:
 
 };
 
+class TrexStreamPktLenData {
+ public:
+    TrexStreamPktLenData() {
+        m_expected_pkt_len = 0;
+    }
+
+    double m_expected_pkt_len;
+    uint16_t m_min_pkt_len;
+    uint16_t m_max_pkt_len;
+};
 
 /**
  * describes a VM program
@@ -1810,7 +1823,6 @@ public:
         m_prefix_size=0;
         m_bss=0;
         m_pkt_size=0;
-        m_expected_pkt_size=0.0;
         m_cur_var_offset=0;
 
         m_is_random_var      = false;
@@ -1828,7 +1840,7 @@ public:
      * if the VM changes the packet length (random) 
      * 
      */
-    double calc_expected_pkt_size(uint16_t regular_pkt_size) const;
+    void calc_pkt_len_data(uint16_t regular_pkt_size, TrexStreamPktLenData &pkt_len_data) const;
 
 
     StreamVmDp * generate_dp_object(){
@@ -1971,7 +1983,7 @@ private:
     uint16_t                           m_prefix_size;
 
     uint16_t                           m_pkt_size;
-    double                             m_expected_pkt_size;
+    TrexStreamPktLenData               m_pkt_len_data;
 
     uint16_t                           m_cur_var_offset;
     uint16_t                           m_max_field_update; /* the location of the last byte that is going to be changed in the packet */ 

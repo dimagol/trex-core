@@ -1,5 +1,3 @@
-#include "flow_table.h"
-#include "tcp_var.h"
 /*
  Hanoh Haim
  Cisco Systems, Inc.
@@ -21,8 +19,10 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-
+#include "astf/json_reader.h"
+#include "tcp_var.h"
 #include "flow_stat_parser.h"
+#include "flow_table.h"
 
 void CSttFlowTableStats::Clear(){
     memset(&m_sts,0,sizeof(m_sts));
@@ -66,7 +66,6 @@ bool CFlowTable::Create(uint32_t size,
     }
     reset_stats();
     m_tcp_api=(CTcpAppApi    *)0;
-    m_prog =(CTcpAppProgram *)0;
     return(true);
 }
 
@@ -143,7 +142,6 @@ void CFlowTable::parse_packet(struct rte_mbuf * mbuf,
         }
 
         l3_pkt_len = ipv4->getTotalLength() + lpf->m_l3_offset;
-
     }else{
         lpf->m_ipv4      =false;
         lpf->m_l3_offset = (uintptr_t)parser.m_ipv6 - (uintptr_t)p;
@@ -151,6 +149,7 @@ void CFlowTable::parse_packet(struct rte_mbuf * mbuf,
         IPv6Header *   ipv6= parser.m_ipv6;
         TCPHeader    * lpTcp = (TCPHeader *)parser.m_l4;
 
+        
         if ( m_client_side ) {
             tuple.set_ip(ipv6->getDestIpv6LSB());
             tuple.set_port(lpTcp->getDestPort());
@@ -158,9 +157,8 @@ void CFlowTable::parse_packet(struct rte_mbuf * mbuf,
             tuple.set_ip(ipv6->getSourceIpv6LSB());
             tuple.set_port(lpTcp->getSourcePort());
         }
-        /* TBD need to find the last header here */
-
-        l3_pkt_len = ipv6->getPayloadLen();
+        /* TBD need to find the last IPv6 header here */
+        l3_pkt_len = ipv6->getPayloadLen()+ lpf->m_l3_offset + IPV6_HDR_LEN;
     }
 
     lpf->m_proto     =   parser.m_protocol;
@@ -309,6 +307,11 @@ void CFlowTable::rx_non_process_packet(tcp_rx_pkt_action_t action,
     }
 }
 
+#undef FLOW_TABLE_DEBUG
+
+#ifdef FLOW_TABLE_DEBUG
+static int pkt_cnt=0;
+#endif
 
 bool CFlowTable::rx_handle_packet(CTcpPerThreadCtx * ctx,
                                   struct rte_mbuf * mbuf){
@@ -323,7 +326,12 @@ bool CFlowTable::rx_handle_packet(CTcpPerThreadCtx * ctx,
         utl_k12_pkt_format(stdout,p1 ,pkt_size1) ;
     }
     #endif
-    
+
+   #ifdef FLOW_TABLE_DEBUG
+   printf ("-- \n");
+   printf (" client:%d process packet %d \n",m_client_side,pkt_cnt);
+   pkt_cnt++;
+   #endif
 
     CSimplePacketParser parser(mbuf);
 
@@ -343,6 +351,11 @@ bool CFlowTable::rx_handle_packet(CTcpPerThreadCtx * ctx,
 
     flow_key_t key=tuple.get_as_uint64();
     uint32_t  hash=tuple.get_hash();
+   #ifdef FLOW_TABLE_DEBUG
+    tuple.dump(stdout);
+    printf ("-- \n");
+   #endif
+
 
     flow_hash_ent_t * lpflow;
     lpflow = m_ft.find(key,hash);
@@ -364,20 +377,21 @@ bool CFlowTable::rx_handle_packet(CTcpPerThreadCtx * ctx,
         return(false);
     }
 
-    /* server side */
-    if (  (lpTcp->getFlags() & TCPHeader::Flag::SYN) ==0 ) {
-        /* no syn */
-        /* TBD need to generate RST packet in this case?? need to check what are the conditions in the old code ??? */
-        rte_pktmbuf_free(mbuf);
-        FT_INC_SCNT(m_err_no_syn);
-        return(false);
+    /* server with SYN packet, it is OK 
+      we need to build the flow and add it to the table */
+
+    /* Patch */
+    uint32_t dest_ip;
+    bool is_ipv6=false;
+    if (parser.m_ipv4){
+        IPHeader *  ipv4 = (IPHeader *)parser.m_ipv4;    
+        dest_ip=ipv4->getDestIp();
+    }else{
+        IPv6Header *   ipv6= parser.m_ipv6;
+        dest_ip =ipv6->getDestIpv6LSB();
+        is_ipv6=true;
     }
 
-    /* server with SYN packet, it is OK 
-    we need to build the flow and add it to the table */
-
-
-    IPHeader *  ipv4 = (IPHeader *)parser.m_ipv4;
     uint8_t *pkt = rte_pktmbuf_mtod(mbuf, uint8_t*);
 
     /* TBD Parser need to be fixed */
@@ -387,15 +401,37 @@ bool CFlowTable::rx_handle_packet(CTcpPerThreadCtx * ctx,
         vlan = lpVlan->getVlanTag();
     }
 
-    /* TBD template port, need to do somthing better  */
-    if (lpTcp->getDestPort() != 80) {
+    uint16_t dst_port = lpTcp->getDestPort();
+
+    /* server side */
+    if (  (lpTcp->getFlags() & TCPHeader::Flag::SYN) ==0 ) {
+        /* no syn */
         generate_rst_pkt(ctx,
-                         ipv4->getDestIp(),
+                         dest_ip,
                          tuple.get_ip(),
-                         lpTcp->getDestPort(),
+                         dst_port,
                          tuple.get_port(),
                          vlan,
-                         false,
+                         is_ipv6,
+                         lpTcp);
+
+        rte_pktmbuf_free(mbuf);
+        FT_INC_SCNT(m_err_no_syn);
+        return(false);
+    }
+
+
+    CTcpData *tcp_data_ro = ctx->get_template_ro();
+    CTcpAppProgram *server_prog = tcp_data_ro->get_server_prog_by_port(dst_port);
+
+    if (! server_prog) {
+        generate_rst_pkt(ctx,
+                         dest_ip,
+                         tuple.get_ip(),
+                         dst_port,
+                         tuple.get_port(),
+                         vlan,
+                         is_ipv6,
                          lpTcp);
 
         rte_pktmbuf_free(mbuf);
@@ -405,19 +441,18 @@ bool CFlowTable::rx_handle_packet(CTcpPerThreadCtx * ctx,
 
 
     lptflow = ctx->m_ft.alloc_flow(ctx,
-                                   ipv4->getDestIp(),
+                                   dest_ip,
                                    tuple.get_ip(),
-                                   lpTcp->getDestPort(),
+                                   dst_port,
                                    tuple.get_port(),
                                    vlan,
-                                   false);
+                                   is_ipv6);
 
 
     if (lptflow == 0 ) {
         rte_pktmbuf_free(mbuf);
         return(false);
     }
-
 
     lptflow->server_update_mac_from_packet(pkt);
 
@@ -429,7 +464,7 @@ bool CFlowTable::rx_handle_packet(CTcpPerThreadCtx * ctx,
 
     CTcpApp * app =&lptflow->m_app;
 
-    app->set_program(m_prog);
+    app->set_program(server_prog);
     app->set_bh_api(m_tcp_api);
     app->set_flow_ctx(ctx,lptflow);
 

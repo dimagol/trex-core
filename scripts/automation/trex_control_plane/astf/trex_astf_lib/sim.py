@@ -44,15 +44,23 @@ def execute_bp_sim(opts):
         if not os.path.exists(exe):
             raise Exception("'{0}' does not exist, please build it before calling the simulation".format(exe))
 
+    if opts.cmd:
+        args = opts.cmd.split(",")
+    else:
+        args = []
+
     exe = [exe]
     if opts.valgrind:
         valgrind = 'valgrind --leak-check=full --error-exitcode=1 --show-reachable=yes '.split()
         exe = valgrind + exe
 
-    cmd = exe + ['--tcp_cfg', DEFAULT_OUT_JSON_FILE, '-o', opts.output_file]
+    cmd = exe + ['--tcp_cfg', DEFAULT_OUT_JSON_FILE, '-o', opts.output_file]+args
+
+    if opts.full:
+        cmd = cmd + ['--full','-d',str(opts.duration)]
 
     if opts.verbose:
-        print ("executing {0}".format(''.join(cmd)))
+        print ("executing {0}".format(' '.join(cmd)))
 
     if opts.verbose:
         rc = subprocess.call(cmd)
@@ -61,6 +69,11 @@ def execute_bp_sim(opts):
         rc = subprocess.call(cmd, stdout=FNULL)
         if rc != 0:
             raise Exception('simulation has failed with error code {0}'.format(rc))
+
+
+def print_stats(prof):
+    # num programs, buffers, cps, bps client/server ip range
+    prof.print_stats()
 
 
 def setParserOptions():
@@ -92,9 +105,28 @@ def setParserOptions():
                         help="Run simulator with json result",
                         action="store_true")
 
+    parser.add_argument('--stat',
+                        help="Print expected usage statistics on TRex server (memory, bps,...) if this file will be used.",
+                        action="store_true")
+
     parser.add_argument('-v', '--verbose',
                         action="store_true",
                         help="Print output to screen")
+
+    parser.add_argument('--full',
+                        action="store_true",
+                        help="run in full simulation mode (with many clients and servers)")
+
+    parser.add_argument('-d','--duration',
+                        type=float,
+                        default=5.0,
+                        help="duration in time for full mode")
+
+    parser.add_argument("-c", "--cmd",
+                        help="command to the simulator",
+                        dest='cmd',
+                        default=None,
+                        type=str)
 
     group = parser.add_mutually_exclusive_group()
 
@@ -117,6 +149,7 @@ def setParserOptions():
 
 
 def main(args=None):
+
     parser = setParserOptions()
     if args is None:
         opts = parser.parse_args()
@@ -132,18 +165,21 @@ def main(args=None):
     except Exception as e:
         print("Failed importing {0}".format(opts.input_file))
         print(e)
-        sys.exit(1)
+        sys.exit(100)
 
     cl = prof.register()
-
     try:
         profile = cl.get_profile()
     except Exception as e:
         print (e)
-        sys.exit(1)
+        sys.exit(100)
 
     if opts.json:
         print(profile.to_json())
+        sys.exit(0)
+
+    if opts.stat:
+        print_stats(profile)
         sys.exit(0)
 
     f = open(DEFAULT_OUT_JSON_FILE, 'w')

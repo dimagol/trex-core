@@ -50,618 +50,6 @@ uint32_t getDualPortId(uint32_t thread_id){
 
 
 
-CRteMemPool       CGlobalInfo::m_mem_pool[MAX_SOCKETS_SUPPORTED];
-
-uint32_t           CGlobalInfo::m_nodes_pool_size = 10*1024;
-CParserOption      CGlobalInfo::m_options;
-CGlobalMemory      CGlobalInfo::m_memory_cfg;
-CPlatformSocketInfo CGlobalInfo::m_socket;
-CGlobalInfo::queues_mode CGlobalInfo::m_q_mode = CGlobalInfo::Q_MODE_NORMAL;
-
-
-
-
-void CGlobalMemory::Dump(FILE *fd){
-    fprintf(fd," Total Memory : \n");
-
-    const std::string * names =get_mbuf_names();
-
-    uint32_t c_size=64;
-    uint32_t c_total=0;
-
-    int i=0;
-    for (i=0; i<MBUF_ELM_SIZE; i++) {
-        if ( (i>MBUF_9k) && (i<MBUF_DP_FLOWS)){
-            continue;
-        }
-        if ( i<TRAFFIC_MBUF_64 ){
-            c_total= m_mbuf[i] *c_size;
-            c_size=c_size*2;
-        }
-
-        fprintf(fd," %-40s  : %lu \n",names[i].c_str(),(ulong)m_mbuf[i]);
-    }
-    c_total += (m_mbuf[MBUF_DP_FLOWS] * sizeof(CGenNode));
-
-    fprintf(fd," %-40s  : %lu \n","get_each_core_dp_flows",(ulong)get_each_core_dp_flows());
-    fprintf(fd," %-40s  : %s  \n","Total memory",double_to_human_str(c_total,"bytes",KBYE_1024).c_str() );
-}
-
-
-void CGlobalMemory::set(const CPlatformMemoryYamlInfo &info,float mul){
-    int i;
-    for (i=0; i<MBUF_ELM_SIZE; i++) {
-        m_mbuf[i]=(uint32_t)((float)info.m_mbuf[i]*mul);
-    }
-    /* no need to multiply */
-    m_mbuf[MBUF_64]   += info.m_mbuf[TRAFFIC_MBUF_64];
-    m_mbuf[MBUF_128]  += info.m_mbuf[TRAFFIC_MBUF_128];
-    m_mbuf[MBUF_256]  += info.m_mbuf[TRAFFIC_MBUF_256];
-    m_mbuf[MBUF_512]  += info.m_mbuf[TRAFFIC_MBUF_512];
-    m_mbuf[MBUF_1024] += info.m_mbuf[TRAFFIC_MBUF_1024];
-    m_mbuf[MBUF_2048] += info.m_mbuf[TRAFFIC_MBUF_2048];
-    m_mbuf[MBUF_4096] += info.m_mbuf[TRAFFIC_MBUF_4096];
-    m_mbuf[MBUF_9k]   += info.m_mbuf[MBUF_9k];
-
-    // We want minimum amount of mbufs from each type, in order to support various extream TX scenarios.
-    // We can consider allowing the user to manually define less mbufs. If for example, a user knows he
-    // will not send packets larger than 2k, we can zero the 4k and 9k pools, saving lots of memory.
-    uint32_t min_pool_size = m_pool_cache_size * m_num_cores * 2;
-    for (i = MBUF_64; i <= MBUF_9k; i++) {
-        if (m_mbuf[i] < min_pool_size) {
-            m_mbuf[i] = min_pool_size;
-        }
-    }
-}
-
-
-////////////////////////////////////////
-
-
-bool CPlatformSocketInfoNoConfig::is_sockets_enable(socket_id_t socket){
-    if ( socket==0 ) {
-        return(true);
-    }
-    return (false);
-}
-
-socket_id_t CPlatformSocketInfoNoConfig::max_num_active_sockets(){
-    return (1);
-}
-
-
-socket_id_t CPlatformSocketInfoNoConfig::port_to_socket(port_id_t port){
-    return (0);
-}
-
-
-void CPlatformSocketInfoNoConfig::set_rx_thread_is_enabled(bool enable) {
-    m_rx_is_enabled = enable;
-}
-
-void CPlatformSocketInfoNoConfig::set_number_of_dual_ports(uint8_t num_dual_ports){
-    m_dual_if   = num_dual_ports;
-}
-
-
-void CPlatformSocketInfoNoConfig::set_number_of_threads_per_ports(uint8_t num_threads){
-    m_threads_per_dual_if = num_threads;
-}
-
-bool CPlatformSocketInfoNoConfig::sanity_check(){
-    return (true);
-}
-
-/* return the core mask */
-uint64_t CPlatformSocketInfoNoConfig::get_cores_mask(){
-
-    uint32_t cores_number = m_threads_per_dual_if*m_dual_if;
-    if ( m_rx_is_enabled ) {
-        cores_number +=   2;
-    }else{
-        cores_number += 1; /* only MASTER*/
-    }
-    int i;
-    int offset=0;
-    /* master */
-    uint64_t res=1;
-    uint64_t mask=(1LL<<(offset+1));
-    for (i=0; i<(cores_number-1); i++) {
-        res |= mask ;
-        mask = mask <<1;
-   }
-   return (res);
-}
-
-virtual_thread_id_t CPlatformSocketInfoNoConfig::thread_phy_to_virt(physical_thread_id_t  phy_id){
-    return (phy_id);
-}
-
-physical_thread_id_t CPlatformSocketInfoNoConfig::thread_virt_to_phy(virtual_thread_id_t virt_id){
-    return (virt_id);
-}
-
-physical_thread_id_t CPlatformSocketInfoNoConfig::get_master_phy_id() {
-    return (0);
-}
-
-bool CPlatformSocketInfoNoConfig::thread_phy_is_rx(physical_thread_id_t  phy_id){
-    return (phy_id==(m_threads_per_dual_if*m_dual_if+1));
-}
-
-
-void CPlatformSocketInfoNoConfig::dump(FILE *fd){
-    fprintf(fd," there is no configuration file given \n");
-}
-
-////////////////////////////////////////
-
-bool CPlatformSocketInfoConfig::Create(CPlatformCoresYamlInfo * platform){
-    m_platform=platform;
-    assert(m_platform);
-    assert(m_platform->m_is_exists);
-    reset();
-    return (true);
-}
-
-bool CPlatformSocketInfoConfig::init(){
-
-    /* iterate the sockets */
-    uint32_t num_threads=0;
-    uint32_t num_dual_if = m_platform->m_dual_if.size();
-
-    if ( m_num_dual_if > num_dual_if ){
-        printf("ERROR number of dual if %d is higher than defined in configuration file %d\n",
-               (int)m_num_dual_if,
-               (int)num_dual_if);
-    }
-
-    int i;
-    for (i=0; i<m_num_dual_if; i++) {
-        CPlatformDualIfYamlInfo * lp=&m_platform->m_dual_if[i];
-        if ( lp->m_socket>=MAX_SOCKETS_SUPPORTED ){
-            printf("ERROR socket %d is bigger than max %d \n",lp->m_socket,MAX_SOCKETS_SUPPORTED);
-            exit(1);
-        }
-
-        if (!m_sockets_enable[lp->m_socket] ) {
-            m_sockets_enable[lp->m_socket]=true;
-            m_sockets_enabled++;
-        }
-
-        m_socket_per_dual_if[i]=lp->m_socket;
-
-        /* learn how many threads per dual-if */
-        if (i==0) {
-            num_threads = lp->m_threads.size();
-            m_max_threads_per_dual_if = num_threads;
-        }else{
-            if (lp->m_threads.size() != num_threads) {
-                printf("ERROR, the number of threads per dual ports should be the same for all dual ports\n");
-                exit(1);
-            }
-        }
-
-        if (m_threads_per_dual_if > m_max_threads_per_dual_if) {
-            printf("ERROR: Maximum threads in platform section of config file is %d, unable to run with -c %d.\n",
-                    m_max_threads_per_dual_if, m_threads_per_dual_if);
-            printf("Please increase the pool in config or use lower -c.\n");
-            exit(1);
-        }
-
-            int j;
-
-            for (j=0; j<m_threads_per_dual_if; j++) {
-                uint8_t virt_thread = 1+ i + j*m_num_dual_if; /* virtual thread */
-                uint8_t phy_thread  = lp->m_threads[j];
-
-                if (phy_thread>MAX_THREADS_SUPPORTED) {
-                    printf("ERROR, physical thread id is %d higher than max %d \n",phy_thread,MAX_THREADS_SUPPORTED);
-                    exit(1);
-                }
-
-                if (virt_thread>MAX_THREADS_SUPPORTED) {
-                    printf("ERROR virtual thread id is %d higher than max %d \n",virt_thread,MAX_THREADS_SUPPORTED);
-                    exit(1);
-                }
-
-                if ( m_thread_phy_to_virtual[phy_thread] ){
-                    printf("ERROR physical thread %d defined twice\n",phy_thread);
-                    exit(1);
-                }
-                m_thread_phy_to_virtual[phy_thread]=virt_thread;
-                m_thread_virt_to_phy[virt_thread] =phy_thread;
-            }
-    }
-
-    if ( m_thread_phy_to_virtual[m_platform->m_master_thread] ){
-        printf("ERROR physical master thread %d already defined  \n",m_platform->m_master_thread);
-        exit(1);
-    }
-
-    if ( m_thread_phy_to_virtual[m_platform->m_rx_thread] ){
-        printf("ERROR physical latency thread %d already defined \n",m_platform->m_rx_thread);
-        exit(1);
-    }
-
-    if (m_max_threads_per_dual_if < m_threads_per_dual_if ) {
-        printf("ERROR number of threads asked per dual if is %d lower than max %d \n",
-               (int)m_threads_per_dual_if,
-               (int)m_max_threads_per_dual_if);
-        exit(1);
-    }
-    return (true);
-}
-
-
-void CPlatformSocketInfoConfig::dump(FILE *fd){
-    fprintf(fd," core_mask  %llx  \n",(unsigned long long)get_cores_mask());
-    fprintf(fd," sockets :");
-    int i;
-    for (i=0; i<MAX_SOCKETS_SUPPORTED; i++) {
-        if ( is_sockets_enable(i) ){
-            fprintf(fd," %d ",i);
-        }
-    }
-    fprintf(fd," \n");
-    fprintf(fd," active sockets : %d \n",max_num_active_sockets());
-
-    fprintf(fd," ports_sockets : %d \n",max_num_active_sockets());
-
-    for (i = 0; i <  TREX_MAX_PORTS; i++) {
-        fprintf(fd,"%d,",port_to_socket(i));
-    }
-    fprintf(fd,"\n");
-
-    fprintf(fd," phy   |   virt   \n");
-    for (i=0; i<MAX_THREADS_SUPPORTED; i++) {
-        virtual_thread_id_t virt=thread_phy_to_virt(i);
-        if ( virt ){
-            fprintf(fd," %d      %d   \n",i,virt);
-        }
-    }
-}
-
-
-void CPlatformSocketInfoConfig::reset(){
-    m_sockets_enabled=0;
-    int i;
-    for (i=0; i<MAX_SOCKETS_SUPPORTED; i++) {
-        m_sockets_enable[i]=false;
-    }
-
-    for (i=0; i<MAX_THREADS_SUPPORTED; i++) {
-        m_thread_virt_to_phy[i]=0;
-    }
-    for (i=0; i<MAX_THREADS_SUPPORTED; i++) {
-        m_thread_phy_to_virtual[i]=0;
-    }
-    for (i = 0; i < TREX_MAX_PORTS >> 1; i++) {
-        m_socket_per_dual_if[i]=0;
-    }
-
-    m_num_dual_if=0;
-
-    m_threads_per_dual_if=0;
-    m_rx_is_enabled=false;
-    m_max_threads_per_dual_if=0;
-}
-
-
-void CPlatformSocketInfoConfig::Delete(){
-
-}
-
-bool CPlatformSocketInfoConfig::is_sockets_enable(socket_id_t socket){
-    assert(socket<MAX_SOCKETS_SUPPORTED);
-    return ( m_sockets_enable[socket] );
-}
-
-socket_id_t CPlatformSocketInfoConfig::max_num_active_sockets(){
-    return  ((socket_id_t)m_sockets_enabled);
-}
-
-socket_id_t CPlatformSocketInfoConfig::port_to_socket(port_id_t port){
-    return ( m_socket_per_dual_if[(port>>1)]);
-}
-
-void CPlatformSocketInfoConfig::set_rx_thread_is_enabled(bool enable){
-    m_rx_is_enabled =enable;
-}
-
-void CPlatformSocketInfoConfig::set_number_of_dual_ports(uint8_t num_dual_ports){
-    m_num_dual_if = num_dual_ports;
-}
-
-void CPlatformSocketInfoConfig::set_number_of_threads_per_ports(uint8_t num_threads){
-     m_threads_per_dual_if =num_threads;
-}
-
-bool CPlatformSocketInfoConfig::sanity_check(){
-    return (init());
-}
-
-/* return the core mask */
-uint64_t CPlatformSocketInfoConfig::get_cores_mask(){
-    int i;
-    uint64_t mask=0;
-    for (i=0; i<MAX_THREADS_SUPPORTED; i++) {
-        if ( m_thread_phy_to_virtual[i] ) {
-
-            if (i>=64) {
-                printf(" ERROR phy threads can't be higher than 64 \n");
-                exit(1);
-            }
-            mask |=(1LL<<i);
-        }
-    }
-
-    mask |=(1LL<<m_platform->m_master_thread);
-    assert(m_platform->m_master_thread<64);
-    if (m_rx_is_enabled) {
-        mask |=(1LL<<m_platform->m_rx_thread);
-        assert(m_platform->m_rx_thread<64);
-    }
-    return (mask);
-}
-
-virtual_thread_id_t CPlatformSocketInfoConfig::thread_phy_to_virt(physical_thread_id_t  phy_id){
-    return (m_thread_phy_to_virtual[phy_id]);
-}
-
-physical_thread_id_t CPlatformSocketInfoConfig::thread_virt_to_phy(virtual_thread_id_t virt_id){
-    return ( m_thread_virt_to_phy[virt_id]);
-}
-
-physical_thread_id_t CPlatformSocketInfoConfig::get_master_phy_id() {
-    return m_platform->m_master_thread;
-}
-
-bool CPlatformSocketInfoConfig::thread_phy_is_rx(physical_thread_id_t  phy_id){
-    return (m_platform->m_rx_thread == phy_id?true:false);
-}
-
-
-
-////////////////////////////////////////
-
-
-bool CPlatformSocketInfo::Create(CPlatformCoresYamlInfo * platform){
-    if ( (platform) && (platform->m_is_exists) ) {
-        CPlatformSocketInfoConfig * lp=new CPlatformSocketInfoConfig();
-        assert(lp);
-        lp->Create(platform);
-        m_obj= lp;
-    }else{
-        m_obj= new CPlatformSocketInfoNoConfig();
-    }
-    return(true);
-}
-
-void CPlatformSocketInfo::Delete(){
-    if ( m_obj ){
-        delete m_obj;
-        m_obj=NULL;
-    }
-}
-
-bool CPlatformSocketInfo::is_sockets_enable(socket_id_t socket){
-     return ( m_obj->is_sockets_enable(socket) );
-}
-
-socket_id_t CPlatformSocketInfo::max_num_active_sockets(){
-    return ( m_obj->max_num_active_sockets() );
-}
-
-
-socket_id_t CPlatformSocketInfo::port_to_socket(port_id_t port){
-    return ( m_obj->port_to_socket(port) );
-}
-
-
-void CPlatformSocketInfo::set_rx_thread_is_enabled(bool enable){
-    m_obj->set_rx_thread_is_enabled(enable);
-}
-
-void CPlatformSocketInfo::set_number_of_dual_ports(uint8_t num_dual_ports){
-    m_obj->set_number_of_dual_ports(num_dual_ports);
-}
-
-void CPlatformSocketInfo::set_number_of_threads_per_ports(uint8_t num_threads){
-    m_obj->set_number_of_threads_per_ports(num_threads);
-}
-
-bool CPlatformSocketInfo::sanity_check(){
-    return ( m_obj->sanity_check());
-}
-
-/* return the core mask */
-uint64_t CPlatformSocketInfo::get_cores_mask(){
-    return ( m_obj->get_cores_mask());
-}
-
-virtual_thread_id_t CPlatformSocketInfo::thread_phy_to_virt(physical_thread_id_t  phy_id){
-    return ( m_obj->thread_phy_to_virt(phy_id));
-}
-
-physical_thread_id_t CPlatformSocketInfo::thread_virt_to_phy(virtual_thread_id_t virt_id){
-    return ( m_obj->thread_virt_to_phy(virt_id));
-}
-
-bool CPlatformSocketInfo::thread_phy_is_master(physical_thread_id_t  phy_id){
-    return ( m_obj->thread_phy_is_master(phy_id));
-}
-
-physical_thread_id_t CPlatformSocketInfo::get_master_phy_id() {
-    return ( m_obj->get_master_phy_id());
-}
-
-bool CPlatformSocketInfo::thread_phy_is_rx(physical_thread_id_t  phy_id) {
-    return ( m_obj->thread_phy_is_rx(phy_id));
-}
-
-void CPlatformSocketInfo::dump(FILE *fd){
-    m_obj->dump(fd);
-}
-
-////////////////////////////////////////
-
-
-void CRteMemPool::dump_in_case_of_error(FILE *fd, rte_mempool_t *mp) {
-    fprintf(fd, " Error: Failed allocating mbuf for holding %d bytes from socket %d \n", mp->elt_size, m_pool_id);
-    fprintf(fd, " Try to enlarge the amount of mbufs in the configuration file '/etc/trex_cfg.yaml'\n");
-    dump(fd);
-}
-
-void CRteMemPool::add_to_json(Json::Value &json, std::string name, rte_mempool_t * pool){
-    uint32_t p_free = rte_mempool_count(pool);
-    uint32_t p_size = pool->size;
-    json[name].append((unsigned long long)p_free);
-    json[name].append((unsigned long long)p_size);
-}
-
-
-void CRteMemPool::dump_as_json(Json::Value &json){
-    add_to_json(json, "64b", m_small_mbuf_pool);
-    add_to_json(json, "128b", m_mbuf_pool_128);
-    add_to_json(json, "256b", m_mbuf_pool_256);
-    add_to_json(json, "512b", m_mbuf_pool_512);
-    add_to_json(json, "1024b", m_mbuf_pool_1024);
-    add_to_json(json, "2048b", m_mbuf_pool_2048);
-    add_to_json(json, "4096b", m_mbuf_pool_4096);
-    add_to_json(json, "9kb", m_mbuf_pool_9k);
-}
-
-
-bool CRteMemPool::dump_one(FILE *fd, const char *name, rte_mempool_t *pool) {
-    float p = 100.0 * (float) rte_mempool_count(pool) / (float)pool->size;
-    fprintf(fd, " %-30s  : %u out of %u (%.2f %%) free %s \n", name
-            , rte_mempool_count(pool), pool->size, p, (p < 5.0) ? "<-- need to enlarge" : "" );
-
-    if (p < 5.0)
-        return false;
-    else
-        return true;
-}
-
-void CRteMemPool::dump(FILE *fd) {
-    bool ok = true;
-    ok &= dump_one(fd, "mbuf_64", m_small_mbuf_pool);
-    ok &= dump_one(fd, "mbuf_128", m_mbuf_pool_128);
-    ok &= dump_one(fd, "mbuf_256", m_mbuf_pool_256);
-    ok &= dump_one(fd, "mbuf_512", m_mbuf_pool_512);
-    ok &= dump_one(fd, "mbuf_1024", m_mbuf_pool_1024);
-    ok &= dump_one(fd, "mbuf_2048", m_mbuf_pool_2048);
-    ok &= dump_one(fd, "mbuf_4096", m_mbuf_pool_4096);
-    ok &= dump_one(fd, "mbuf_9k", m_mbuf_pool_9k);
-
-    if (! ok) {
-        fprintf(fd, "In order to enlarge the amount of allocated mbufs, need to add section like this to config file:\n");
-        fprintf(fd, "memory:\n");
-        fprintf(fd, "    mbuf_xx: <num>\n");
-        fprintf(fd, "For example:\n");
-        fprintf(fd, "    mbuf_9k: 5000\n");
-        fprintf(fd, "See getting started manual for details\n");
-    }
-}
-
-////////////////////////////////////////
-
-void CGlobalInfo::dump_pool_as_json(Json::Value &json){
-    CPlatformSocketInfo * lpSocket =&m_socket;
-
-    for (int i=0; i<(int)MAX_SOCKETS_SUPPORTED; i++) {
-        if (lpSocket->is_sockets_enable((socket_id_t)i)) {
-            std::string socket_id = "cpu-socket-" + std::to_string(i);
-            m_mem_pool[i].dump_as_json(json["mbuf_stats"][socket_id]);
-        }
-    }
-}
-
-std::string CGlobalInfo::dump_pool_as_json_str(void){
-    Json::Value json;
-    dump_pool_as_json(json);
-    return (json.toStyledString());
-}
-
-void CGlobalInfo::free_pools(){
-    CPlatformSocketInfo * lpSocket =&m_socket;
-    CRteMemPool * lpmem;
-    int i;
-    for (i=0; i<(int)MAX_SOCKETS_SUPPORTED; i++) {
-        if (lpSocket->is_sockets_enable((socket_id_t)i)) {
-            lpmem= &m_mem_pool[i];
-            utl_rte_mempool_delete(lpmem->m_small_mbuf_pool);
-            utl_rte_mempool_delete(lpmem->m_mbuf_pool_128);
-            utl_rte_mempool_delete(lpmem->m_mbuf_pool_256);
-            utl_rte_mempool_delete(lpmem->m_mbuf_pool_512);
-            utl_rte_mempool_delete(lpmem->m_mbuf_pool_1024);
-            utl_rte_mempool_delete(lpmem->m_mbuf_pool_2048);
-            utl_rte_mempool_delete(lpmem->m_mbuf_pool_4096);
-            utl_rte_mempool_delete(lpmem->m_mbuf_pool_9k);
-    }
-    utl_rte_mempool_delete(m_mem_pool[0].m_mbuf_global_nodes);
-  }
-}
-
-/*
- * Create mbuf pools. Number of mbufs allocated for each pool is taken from config file.
- * The numbers of the pool used for RX packets is increased.
- * rx_buffers - how many additional buffers to allocate for rx packets
- * rx_pool - which pool is being used for rx packets
- */
-void CGlobalInfo::init_pools(uint32_t rx_buffers, uint32_t rx_pool) {
-        /* this include the pkt from 64- */
-    CGlobalMemory * lp=&CGlobalInfo::m_memory_cfg;
-    CPlatformSocketInfo * lpSocket =&m_socket;
-
-    CRteMemPool * lpmem;
-    lp->m_mbuf[rx_pool] += rx_buffers;
-
-    for (int sock = 0;  sock < MAX_SOCKETS_SUPPORTED; sock++) {
-        if (lpSocket->is_sockets_enable((socket_id_t)sock)) {
-            lpmem = &m_mem_pool[sock];
-            lpmem->m_pool_id = sock;
-            struct {
-                char pool_name[100];
-                rte_mempool_t **pool_p;
-                uint32_t pool_type;
-                uint32_t mbuf_size;
-            }  pools [] = {
-                { "small-pkt-const", &lpmem->m_small_mbuf_pool, MBUF_64, CONST_SMALL_MBUF_SIZE },
-                { "_128-pkt-const", &lpmem->m_mbuf_pool_128, MBUF_128, CONST_128_MBUF_SIZE },
-                { "_256-pkt-const", &lpmem->m_mbuf_pool_256, MBUF_256, CONST_256_MBUF_SIZE },
-                { "_512-pkt-const", &lpmem->m_mbuf_pool_512, MBUF_512, CONST_512_MBUF_SIZE },
-                { "_1024-pkt-const", &lpmem->m_mbuf_pool_1024, MBUF_1024, CONST_1024_MBUF_SIZE },
-                { "_2048-pkt-const", &lpmem->m_mbuf_pool_2048, MBUF_2048, CONST_2048_MBUF_SIZE },
-                { "_4096-pkt-const", &lpmem->m_mbuf_pool_4096, MBUF_4096, CONST_4096_MBUF_SIZE },
-                { "_9k-pkt-const", &lpmem->m_mbuf_pool_9k, MBUF_9k, CONST_9k_MBUF_SIZE },
-            };
-
-            for (int j = 0; j < sizeof(pools)/ sizeof(pools[0]); j++) {
-                *pools[j].pool_p = utl_rte_mempool_create(pools[j].pool_name,
-                                                         lp->m_mbuf[pools[j].pool_type]
-                                                         , pools[j].mbuf_size, 32, sock);
-                if (*pools[j].pool_p == NULL) {
-                    fprintf(stderr, "Error: Failed creaating %s mbuf pool with %d mbufs. Exiting\n"
-                            , pools[j].pool_name, lp->m_mbuf[pools[j].pool_type]);
-                    exit(1);
-                }
-            }
-
-        }
-    }
-
-    /* global always from socket 0 */
-    m_mem_pool[0].m_mbuf_global_nodes = utl_rte_mempool_create_non_pkt("global-nodes",
-                                                         lp->m_mbuf[MBUF_GLOBAL_FLOWS],
-                                                         sizeof(CGenNode),
-                                                         128,
-                                                         SOCKET_ID_ANY);
-    assert(m_mem_pool[0].m_mbuf_global_nodes);
-}
-
-
 
 void CFlowYamlInfo::Dump(FILE *fd){
     fprintf(fd,"name        : %s \n",m_name.c_str());
@@ -682,51 +70,6 @@ void CFlowYamlInfo::Dump(FILE *fd){
 }
 
 
-
-
-void  dump_mac_addr(FILE* fd,uint8_t *p){
-    int i;
-    for (i=0; i<6; i++) {
-        uint8_t a=p[i];
-        if (i==5) {
-            fprintf(fd,"%02x",a);
-        }else{
-            fprintf(fd,"%02x:",a);
-        }
-    }
-
-}
-
-
-
-
-void CPreviewMode::Dump(FILE *fd){
-    fprintf(fd," flags           : %x\n", m_flags);
-    fprintf(fd," write_file      : %d\n", getFileWrite()?1:0);
-    fprintf(fd," verbose         : %d\n", (int)getVMode() );
-    fprintf(fd," realtime        : %d\n", (int)getRealTime() );
-    fprintf(fd," flip            : %d\n", (int)getClientServerFlip() );
-    fprintf(fd," cores           : %d\n", (int)getCores()  );
-    fprintf(fd," single core     : %d\n", (int)getSingleCore() );
-    fprintf(fd," flow-flip       : %d\n", (int)getClientServerFlowFlip() );
-    fprintf(fd," no clean close  : %d\n", (int)getNoCleanFlowClose() );
-    fprintf(fd," zmq_publish     : %d\n", (int)get_zmq_publish_enable() );
-    fprintf(fd," vlan mode       : %d\n",  get_vlan_mode());
-    fprintf(fd," client_cfg      : %d\n", (int)get_is_client_cfg_enable() );
-    fprintf(fd," mbuf_cache_disable  : %d\n", (int)isMbufCacheDisabled() );
-    fprintf(fd," tcp_mode        : %d\n", (int)get_tcp_mode()?1:0 );
-}
-
-void CPreviewMode::set_vlan_mode_verify(uint8_t mode) {
-        // validate that there is no vlan both in platform config file and traffic profile
-    if ((CGlobalInfo::m_options.preview.get_vlan_mode() != CPreviewMode::VLAN_MODE_NONE) &&
-        ( CGlobalInfo::m_options.preview.get_vlan_mode() != mode ) ) {
-        fprintf(stderr, "Error: You are not allowed to specify vlan both in platform config file (--cfg) and traffic config file (-f)\n");
-        fprintf(stderr, "       Please remove vlan definition from one of the files, and try again.\n");
-        exit(1);
-    }
-    set_vlan_mode(mode);
-}
 
 void CFlowGenStats::clear(){
    m_nat_lookup_no_flow_id=0;
@@ -1008,6 +351,20 @@ void CPacketIndication::Dump(FILE *fd,int verbose){
     }else{
         fprintf(fd," not valid packet \n");
     }
+
+#ifdef DEBUG
+    fprintf(fd," offsets \n");
+    fprintf(fd," ------\n");
+    fprintf(fd," eth       : %d \n",(int)m_ether_offset);
+    fprintf(fd," ip        : %d \n",(int)m_ip_offset);
+    fprintf(fd," udp/tcp   : %d \n",(int)m_udp_tcp_offset);
+    fprintf(fd," payload   : %d \n",(int)m_payload_offset);
+    fprintf(fd," l3_size   : %d \n",(int)m_udp_tcp_offset-m_ip_offset);
+    fprintf(fd," r/w       : %d \n",(int)m_rw_mbuf_size);
+    fprintf(fd," r/o       : %d \n",(int)m_ro_mbuf_size);
+    fprintf(fd,"----------------\n");
+    fprintf(fd,"\n");
+#endif
 }
 
 void CPacketIndication::Clean(){
@@ -1644,145 +1001,6 @@ uint64_t CFlowTableMap::count(){
 }
 
 
-/*
- * This function will insert an IP option header containing metadata for the
- * rx-check feature.
- *
- * An mbuf is created to hold the new option header plus the portion of the
- * packet after the base IP header (includes any IP options header that might
- * exist).  This mbuf is then linked into the existing mbufs (becoming the
- * second mbuf).
- *
- * Note that the rxcheck option header is inserted as the first option header,
- * and any existing IP option headers are placed after it.
- */
-void CFlowPktInfo::do_generate_new_mbuf_rxcheck(rte_mbuf_t * m,
-                                 CGenNode * node,
-                                 bool single_port){
-
-    /* retrieve size of rx-check header, must be multiple of 8 */
-    uint16_t opt_len =  RX_CHECK_LEN;
-    uint16_t current_opt_len =  0;
-    assert( (opt_len % 8) == 0 );
-
-    m->l3_len += RX_CHECK_LEN;
-
-    /* determine starting move location */
-    char *mp1 = rte_pktmbuf_mtod(m, char*);
-    uint16_t mp1_offset = m_pkt_indication.getFastIpOffsetFast();
-    if (unlikely (m_pkt_indication.is_ipv6()) ) {
-        mp1_offset += IPv6Header::DefaultSize;
-    }else{
-        mp1_offset += IPHeader::DefaultSize;
-    }
-    char *move_from = mp1 + mp1_offset;
-
-    /* determine size of new mbuf required */
-    uint16_t move_len = m->data_len - mp1_offset;
-    uint16_t new_mbuf_size = move_len + opt_len;
-    uint16_t mp2_offset = opt_len;
-
-    /* obtain a new mbuf */
-    rte_mbuf_t * new_mbuf = CGlobalInfo::pktmbuf_alloc(node->get_socket_id(), new_mbuf_size);
-    assert(new_mbuf);
-    char * mp2 = rte_pktmbuf_append(new_mbuf, new_mbuf_size);
-    char * move_to = mp2 + mp2_offset;
-
-    /* move part of packet from first mbuf to new mbuf */
-    memmove(move_to, move_from, move_len);
-
-    /* trim first mbuf and set pointer to option header*/
-    CRx_check_header *rxhdr;
-    uint16_t buf_adjust = move_len;
-    rxhdr = (CRx_check_header *)mp2;
-    m->data_len -= buf_adjust;
-
-    /* insert rx-check data as an IPv4 option header or IPv6 extension header*/
-    CFlowPktInfo *  lp=node->m_pkt_info;
-    CPacketDescriptor   * desc=&lp->m_pkt_indication.m_desc;
-
-    /* set option type and update ip header length */
-    IPHeader * ipv4=(IPHeader *)(mp1 + 14);
-    if (unlikely (m_pkt_indication.is_ipv6()) ) {
-        IPv6Header * ipv6=(IPv6Header *)(mp1 + 14);
-        uint8_t save_header= ipv6->getNextHdr();
-        ipv6->setNextHdr(RX_CHECK_V6_OPT_TYPE);
-         ipv6->setHopLimit(TTL_RESERVE_DUPLICATE);
-        ipv6->setTrafficClass(ipv6->getTrafficClass() | TOS_GO_TO_CPU);
-        ipv6->setPayloadLen( ipv6->getPayloadLen() +
-                                  sizeof(CRx_check_header));
-        rxhdr->m_option_type = save_header;
-        rxhdr->m_option_len = RX_CHECK_V6_OPT_LEN;
-    }else{
-        current_opt_len = ipv4->getHeaderLength();
-        ipv4->setHeaderLength(current_opt_len+opt_len);
-        ipv4->setTotalLength(ipv4->getTotalLength()+opt_len);
-        ipv4->setTimeToLive(TTL_RESERVE_DUPLICATE);
-        ipv4->setTOS(ipv4->getTOS() | TOS_GO_TO_CPU);
-
-        rxhdr->m_option_type = RX_CHECK_V4_OPT_TYPE;
-        rxhdr->m_option_len = RX_CHECK_V4_OPT_LEN;
-    }
-
-    /* fill in the rx-check metadata in the options header */
-    if ( CGlobalInfo::m_options.is_rxcheck_const_ts() ){
-        /* Runtime flag to use a constant value for the timestamp field. */
-        /* This is used by simulation to provide consistency across runs. */
-        rxhdr->m_time_stamp = 0xB3B2B1B0;
-    }else{
-        rxhdr->m_time_stamp = os_get_hr_tick_32();
-    }
-    rxhdr->m_magic      = RX_CHECK_MAGIC;
-    rxhdr->m_flow_id     = node->m_flow_id | ( ( (uint64_t)(desc->getFlowId() & 0xf))<<52 ) ; // include thread_id, node->flow_id, sub_flow in case of multi-flow template
-    rxhdr->m_flags       =  0;
-    rxhdr->m_aging_sec   =  desc->GetMaxFlowTimeout();
-    rxhdr->m_template_id    = (uint8_t)desc->getId();
-
-    /* add the flow packets goes to the same port */
-    if (single_port) {
-        rxhdr->m_pkt_id     = desc->getFlowPktNum();
-        rxhdr->m_flow_size  = desc->GetMaxPktsPerFlow();
-
-    }else{
-        rxhdr->m_pkt_id     = desc->GetDirInfo()->GetPktNum();
-        rxhdr->m_flow_size  = desc->GetDirInfo()->GetMaxPkts();
-        /* set dir */
-        rxhdr->set_dir(desc->IsInitSide()?1:0);
-        rxhdr->set_both_dir(desc->IsBiDirectionalFlow()?1:0);
-    }
-
-
-    /* update checksum for IPv4, split across 2 mbufs */
-    if (likely ( ! m_pkt_indication.is_ipv6()) ) {
-        if (CGlobalInfo::m_options.preview.getChecksumOffloadEnable()) {
-            ipv4->myChecksum = 0;
-                        /* update TCP/UDP checksum */
-            if ( m_pkt_indication.m_desc.IsTcp() ) {
-                TCPHeader * tcp = (TCPHeader *)(move_to);
-                update_tcp_cs(tcp,ipv4);
-            }else {
-                if ( m_pkt_indication.m_desc.IsUdp() ){
-                    UDPHeader * udp =(UDPHeader *)(move_to);
-                    update_udp_cs(udp,ipv4);
-                }else{
-                }
-            }
-
-        } else {
-            ipv4->updateCheckSum2((uint8_t *)ipv4, IPHeader::DefaultSize, (uint8_t *)rxhdr, current_opt_len+opt_len -IPHeader::DefaultSize);
-        }
-    }
-
-
-    /* link new mbuf */
-    new_mbuf->next = m->next;
-    new_mbuf->nb_segs++;
-    m->next = new_mbuf;
-    m->nb_segs++;
-    m->pkt_len += opt_len;
-}
-
-
 char * CFlowPktInfo::push_ipv4_option_offline(uint8_t bytes){
     /* must be align by 4*/
     assert( (bytes % 4)== 0 );
@@ -1994,11 +1212,17 @@ void CCapFileFlowInfo::generate_flow(CTupleTemplateGeneratorSmart   * tuple_gen,
         // check if flow is two direction
         if ( lp->m_pkt_indication.m_desc.IsBiDirectionalFlow() ) {
             /* we are in learn mode */
+            bool is_ok;
             if (CGlobalInfo::is_learn_mode(CParserOption::LEARN_MODE_IP_OPTION) ||
                 node->m_pkt_info->m_pkt_indication.l3.m_ipv4->getProtocol() == IPPROTO_TCP) {
-                lpThread->associate(((uint32_t)flow_id) & NAT_FLOW_ID_MASK_TCP_ACK, node);  /* associate flow_id=>node */
+                is_ok = lpThread->associate(((uint32_t)flow_id) & NAT_FLOW_ID_MASK_TCP_ACK, node);  /* associate flow_id=>node */
+                assert(is_ok);
             } else {
-                lpThread->associate(((uint32_t)flow_id) & NAT_FLOW_ID_MASK_IP_ID, node);  /* associate flow_id=>node */
+               is_ok = lpThread->associate(((uint32_t)flow_id) & NAT_FLOW_ID_MASK_IP_ID, node);  /* associate flow_id=>node */
+               if (! is_ok) {
+                   fprintf(stderr, "With given learn mode, max supported rate of UDP flows is limited. Please reduce the rate\n");
+                   exit(1);
+               }
             }
             node->set_nat_first_state();
         }
@@ -3441,6 +2665,16 @@ bool CFlowsYamlInfo::verify_correctness(uint32_t num_threads) {
 
 
 
+void CFlowsYamlInfo::set_astf_mode(){
+    m_vec.clear();
+    m_tw.reset();
+    if (CGlobalInfo::m_options.m_duration > 0.1) {
+        m_duration_sec = CGlobalInfo::m_options.m_duration;
+    }
+    m_is_plugin_configured=false;
+}
+
+
 int CFlowsYamlInfo::load_from_yaml_file(std::string file_name){
     m_vec.clear();
     m_tw.reset();
@@ -3950,10 +3184,11 @@ bool CFlowGenListPerThread::Create(uint32_t           thread_id,
     m_thread_id=thread_id;
 
     m_c_tcp=0;
+    m_c_tcp_io =0;
     m_s_tcp=0;
-    m_prog_c=0; 
-    m_prog_s=0; 
-
+    m_s_tcp_io=0;
+    m_tcp_fif_d_time=0.0;
+    m_tcp_terminate=false;
 
     m_cpu_cp_u.Create(&m_cpu_dp_u);
 
@@ -3987,41 +3222,46 @@ bool CFlowGenListPerThread::Create(uint32_t           thread_id,
     m_flow_id_to_node_lookup.Create();
 
     /* split the clients to threads */
-    CTupleGenYamlInfo * tuple_gen = &m_flow_list->m_yaml_info.m_tuple_gen;
 
-    double active_flows_per_core = flow_list->get_worse_case_active_flows()/(double)m_max_threads;
+    if (! get_is_tcp_mode()) {
 
-    m_smart_gen.Create(0,m_thread_id);
+        CTupleGenYamlInfo * tuple_gen = &m_flow_list->m_yaml_info.m_tuple_gen;
 
-    /* split the clients to threads using the mask */
-    CIpPortion  portion;
-    for (int i=0;i<tuple_gen->m_client_pool.size();i++) {
-        split_ips(m_thread_id, m_max_threads, getDualPortId(),
-                  tuple_gen->m_client_pool[i],
-                  portion);
+        double active_flows_per_core = flow_list->get_worse_case_active_flows()/(double)m_max_threads;
 
-        m_smart_gen.add_client_pool(tuple_gen->m_client_pool[i].m_dist,
-                                    portion.m_ip_start,
-                                    portion.m_ip_end,
-                                    active_flows_per_core,
-                                    m_flow_list->m_client_config_info,
-                                    tuple_gen->m_client_pool[i].m_tcp_aging_sec,
-                                    tuple_gen->m_client_pool[i].m_udp_aging_sec
-                                    );
+        m_smart_gen.Create(0,m_thread_id);
+
+        /* split the clients to threads using the mask */
+        CIpPortion  portion;
+        for (int i=0;i<tuple_gen->m_client_pool.size();i++) {
+            split_ips(m_thread_id, m_max_threads, getDualPortId(),
+                      tuple_gen->m_client_pool[i],
+                      portion);
+
+            m_smart_gen.add_client_pool(tuple_gen->m_client_pool[i].m_dist,
+                                        portion.m_ip_start,
+                                        portion.m_ip_end,
+                                        active_flows_per_core,
+                                        m_flow_list->m_client_config_info,
+                                        tuple_gen->m_client_pool[i].m_tcp_aging_sec,
+                                        tuple_gen->m_client_pool[i].m_udp_aging_sec
+                                        );
+        }
+        for (int i=0;i<tuple_gen->m_server_pool.size();i++) {
+            split_ips(m_thread_id, m_max_threads, getDualPortId(),
+                      tuple_gen->m_server_pool[i],
+                      portion);
+            m_smart_gen.add_server_pool(tuple_gen->m_server_pool[i].m_dist,
+                                        portion.m_ip_start,
+                                        portion.m_ip_end,
+                                        active_flows_per_core,
+                                        tuple_gen->m_server_pool[i].m_is_bundling);
+        }
+
+        init_from_global();
+    }else{
+        m_yaml_info =m_flow_list->m_yaml_info;
     }
-    for (int i=0;i<tuple_gen->m_server_pool.size();i++) {
-        split_ips(m_thread_id, m_max_threads, getDualPortId(),
-                  tuple_gen->m_server_pool[i],
-                  portion);
-        m_smart_gen.add_server_pool(tuple_gen->m_server_pool[i].m_dist,
-                        portion.m_ip_start,
-                        portion.m_ip_end,
-                        active_flows_per_core,
-                        tuple_gen->m_server_pool[i].m_is_bundling);
-    }
-
-
-    init_from_global();
 
     CMessagingManager * rx_dp=CMsgIns::Ins()->getRxDp();
 
@@ -4158,6 +3398,7 @@ static void free_map_flow_id_to_node(CGenNode *p){
 
 
 void CFlowGenListPerThread::Delete(){
+    Delete_tcp();
 
     // free all current maps
     m_flow_id_to_node_lookup.remove_all(free_map_flow_id_to_node);
@@ -5326,18 +4567,29 @@ void CFlowGenListPerThread::start_stateless_daemon(CPreviewMode &preview){
 
 void CFlowGenListPerThread::start_generate_stateful(std::string erf_file_name,
                                 CPreviewMode & preview){
-    /* now we are ready to generate*/
-    if ( m_cap_gen.size()==0 ){
-        fprintf(stderr," nothing to generate no template loaded \n");
-        return;
-    }
+    dsec_t d_time_flow;
 
+    /* now we are ready to generate*/
+    if ( ! get_is_tcp_mode()) {
+        if ( m_cap_gen.size()==0 ){
+            fprintf(stderr," nothing to generate no template loaded \n");
+            return;
+        }
+        m_cur_template =(m_thread_id % m_cap_gen.size());
+
+        d_time_flow=get_delta_flow_is_sec();
+        m_cur_time_sec =  0.01 + m_thread_id*m_flow_list->get_delta_flow_is_sec();
+    }else{
+        if ( !Create_tcp() ){
+            fprintf(stderr," ERROR in tcp object creation \n");
+            return;
+        }
+
+        d_time_flow = m_tcp_fif_d_time; /* set by Create_tcp function */
+        m_cur_time_sec =  0.01 + (double)m_thread_id*m_tcp_fif_d_time/(double)m_max_threads;
+    }
     m_preview_mode = preview;
     m_node_gen.open_file(erf_file_name,&m_preview_mode);
-    dsec_t d_time_flow=get_delta_flow_is_sec();
-
-    m_cur_time_sec =  0.01 + m_thread_id*m_flow_list->get_delta_flow_is_sec();
-
 
     if ( CGlobalInfo::is_realtime()  ){
         if (m_cur_time_sec > 0.2 ) {
@@ -5348,7 +4600,6 @@ void CFlowGenListPerThread::start_generate_stateful(std::string erf_file_name,
     dsec_t c_stop_sec = m_cur_time_sec + m_yaml_info.m_duration_sec;
     m_stop_time_sec =c_stop_sec;
     m_cur_flow_id =1;
-    m_cur_template =(m_thread_id % m_cap_gen.size());
     m_stats.clear();
 
     double old_offset=0.0;
@@ -5381,11 +4632,6 @@ void CFlowGenListPerThread::start_generate_stateful(std::string erf_file_name,
             m_node_gen.add_node(node);
         }
     }else{
-
-        if ( !Create_tcp() ){
-            fprintf(stderr," ERROR in tcp object creation \n");
-            return;
-        }
 
         m_tcp_fif_d_time =  d_time_flow;
         CGenNode * node= create_node() ;
@@ -5553,6 +4799,20 @@ int CFlowGenList::update_active_flows(uint32_t active_flows){
         lp->updateIpg(ipg_factor);
         lp->getFlowStats(&stats);
         sum.Add(stats);
+    }
+
+    return(0);
+}
+
+
+int CFlowGenList::load_astf(){
+
+    m_yaml_info.set_astf_mode();
+
+    uint8_t idx;
+    for (idx=0; idx<6; idx++){
+        CGlobalInfo::m_options.m_src_ipv6[idx] = 0;
+        CGlobalInfo::m_options.m_dst_ipv6[idx] = 0;
     }
 
     return(0);
@@ -5761,102 +5021,6 @@ double CFlowGenList::get_delta_flow_is_sec(){
 }
 
 
-
-bool CPolicer::update(double dsize,double now_sec){
-    if ( m_last_time ==0.0 ) {
-        /* first time */
-        m_last_time = now_sec;
-        return (true);
-    }
-    if (m_cir == 0.0) {
-        return (false);
-    }
-
-        // check if there is a need to add tokens
-    if(now_sec > m_last_time) {
-        dsec_t dtime=(now_sec - m_last_time);
-        dsec_t dsize =dtime*m_cir;
-        m_level +=dsize;
-        if (m_level > m_bucket_size) {
-            m_level = m_bucket_size;
-        }
-        m_last_time = now_sec;
-    }
-
-    if (m_level > dsize) {
-        m_level -= dsize;
-        return (true);
-    }else{
-        return (false);
-    }
-}
-
-
-
-/*
- * Test if option value is within allowed range.
- * val - Value to test
- * min, max - minimum, maximum allowed values.
- * opt_name - option name for error report.
- */
-bool CParserOption::is_valid_opt_val(int val, int min, int max, const std::string &opt_name) {
-    if (val < min || val > max) {
-    std::cerr << "Value " << val << " for option " << opt_name << " is out of range. Should be (" <<  min << "-" << max << ")." << std::endl;
-    return false;
-    }
-
-    return true;
-}
-
-void CParserOption::dump(FILE *fd){
-    preview.Dump(fd);
-    fprintf(fd," cfg file        : %s \n",cfg_file.c_str());
-    fprintf(fd," mac file        : %s \n",client_cfg_file.c_str());
-    fprintf(fd," out file        : %s \n",out_file.c_str());
-    fprintf(fd," client cfg file : %s \n",out_file.c_str());
-    fprintf(fd," duration        : %.0f \n",m_duration);
-    fprintf(fd," factor          : %.0f \n",m_factor);
-    fprintf(fd," mbuf_factor     : %.0f \n",m_mbuf_factor);
-    fprintf(fd," latency         : %d pkt/sec \n",m_latency_rate);
-    fprintf(fd," zmq_port        : %d \n",m_zmq_port);
-    fprintf(fd," telnet_port     : %d \n",m_telnet_port);
-    fprintf(fd," expected_ports  : %d \n",m_expected_portd);   
-    fprintf(fd," tw_bucket_usec  : %f usec \n",get_tw_bucket_time_in_sec()*1000000.0);   
-    fprintf(fd," tw_buckets      : %lu usec \n",(ulong)get_tw_buckets());   
-    fprintf(fd," tw_levels       : %lu usec \n",(ulong)get_tw_levels());   
-
-
-    if (preview.get_vlan_mode() == CPreviewMode::VLAN_MODE_LOAD_BALANCE) {
-       fprintf(fd," vlans (for load balance) : [%d,%d] \n",m_vlan_port[0],m_vlan_port[1]);
-    }
-
-    int i;
-    for (i = 0; i < TREX_MAX_PORTS; i++) {
-        fprintf(fd," port : %d dst:",i);
-        CMacAddrCfg * lp=&m_mac_addr[i];
-        dump_mac_addr(fd,lp->u.m_mac.dest);
-        fprintf(fd,"  src:");
-        dump_mac_addr(fd,lp->u.m_mac.src);
-        if (preview.get_vlan_mode() == CPreviewMode::VLAN_MODE_NORMAL) {
-            fprintf(fd, " vlan:%d", m_ip_cfg[i].get_vlan());
-        }
-        fprintf(fd,"\n");
-    }
-
-}
-
-void CParserOption::verify() {
-    /* check for mutual exclusion options */
-    if ( preview.get_is_client_cfg_enable() ) {
-        if ( preview.get_vlan_mode() == CPreviewMode::VLAN_MODE_LOAD_BALANCE ) {
-            throw std::runtime_error("--client_cfg_file option can not be combined with specifing VLAN in traffic profile");
-        }
-
-        if (preview.get_mac_ip_overide_enable()) {
-            throw std::runtime_error("MAC override can not be combined with --client_cfg_file option");
-        }
-    }
-}
 
 #if 0
 
@@ -6145,23 +5309,6 @@ int CErfIFStl::send_node(CGenNode * _no_to_use){
 }
 
 
-int CErfIFTcp::send_node(CGenNode * node){
-    CNodeTcp * node_tcp = (CNodeTcp *) node;
-    uint8_t dir=node_tcp->dir;
-
-    /* TBD need to take this from simulator */
-    static double time=0.0;
-    time+=0.010;
-    fill_pkt(m_raw,node_tcp->mbuf);
-
-    CPktNsecTimeStamp t_c(time);
-    m_raw->time_nsec = t_c.m_time_nsec;
-    m_raw->time_sec  = t_c.m_time_sec;
-    uint8_t p_id = (uint8_t)dir;
-    m_raw->setInterface(p_id);
-    int rc = write_pkt(m_raw);
-    return (rc);
-}
 
 void CErfIF::add_vlan(uint16_t vlan_id) {
     uint8_t *buffer =(uint8_t *)m_raw->raw;

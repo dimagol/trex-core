@@ -54,6 +54,11 @@ class ASTFCmdSend(ASTFCmd):
         self._buf = base64.b64encode(buf).decode()
         self.fields['name'] = 'tx'
         self.fields['buf_index'] = -1
+        self.buffer_len = len(buf) # buf len before decode
+
+    @property
+    def buf_len(self):
+        return self.buffer_len
 
     @property
     def buf(self):
@@ -97,10 +102,28 @@ class ASTFCmdReset(ASTFCmd):
 
 
 class ASTFProgram(object):
+    """
+
+       Emulation L7 program   
+
+       .. code-block:: python
+
+            # server commands
+            prog_s = ASTFProgram()
+            prog_s.recv(len(http_req))
+            prog_s.send(http_response)
+            prog_s.delay(10)
+            prog_s.reset()
+
+     """
+
     class BufferList():
         def __init__(self):
             self.buf_list = []
             self.buf_hash = {}
+
+        def get_len(self):
+            return len(self.buf_list)
 
         # add, and return index of added buffer
         def add(self, new_buf):
@@ -134,6 +157,20 @@ class ASTFProgram(object):
         return ASTFProgram.buf_list.to_json()
 
     def __init__(self, file=None, side="c", commands=None):
+        """ 
+
+        :parameters:
+                  file : string 
+                     pcap file to analyze  
+
+                  side : string 
+                        "c" for client side or "s" for server side 
+
+                  commands   : list
+                        list of command objects cound be NULL in case you call the API
+
+        """
+
         ver_args = {"types":
                     [{"name": "file", 'arg': file, "t": str, "must": False},
                      {"name": "commands", 'arg': commands, "t": ASTFCmd, "must": False, "allow_list": True},
@@ -145,6 +182,8 @@ class ASTFProgram(object):
 
         self.fields = {}
         self.fields['commands'] = []
+        self.total_send_bytes = 0
+        self.total_rcv_bytes = 0
         if file is not None:
             cap = CPcapReader(_ASTFCapPath.get_pcap_file_path(file))
             cap.analyze()
@@ -159,6 +198,15 @@ class ASTFProgram(object):
         return hashlib.sha256(repr(self.to_json()).encode()).digest()
 
     def send(self, buf):
+        """ 
+        send (l7_buffer)
+
+        :parameters:
+                  buf : string
+                     l7 stream
+
+        """
+
         ver_args = {"types":
                      [{"name": "buf", 'arg': buf, "t": [bytes, str]}]
                     }
@@ -175,18 +223,38 @@ class ASTFProgram(object):
             enc_buf = buf
 
         cmd = ASTFCmdSend(enc_buf)
+        self.total_send_bytes += cmd.buf_len
         cmd.index = ASTFProgram.buf_list.add(cmd.buf)
         self.fields['commands'].append(cmd)
 
     def recv(self, bytes):
+        """ 
+        recv (bytes)
+
+        :parameters:
+                  bytes  : uint32_t 
+                     wait until we receive at least  x number of bytes 
+
+        """
+
         ver_args = {"types":
                      [{"name": "bytes", 'arg': bytes, "t": int}]
                     }
         ArgVerify.verify(self.__class__.__name__ + "." + sys._getframe().f_code.co_name, ver_args)
 
-        self.fields['commands'].append(ASTFCmdRecv(bytes))
+        self.total_rcv_bytes += bytes
+        self.fields['commands'].append(ASTFCmdRecv(self.total_rcv_bytes))
 
     def delay(self, msec):
+        """ 
+        delay for x usec 
+
+        :parameters:
+                  msec  : float
+                     delay for this time in usec 
+
+        """
+
         ver_args = {"types":
                     [{"name": "msec", 'arg': msec, "t": [int, float]}]
         }
@@ -195,24 +263,33 @@ class ASTFProgram(object):
         self.fields['commands'].append(ASTFCmdDelay(msec))
 
     def reset(self):
+        """ 
+        for TCP connection send RST to peer 
+
+        """
+
         self.fields['commands'].append(ASTFCmdReset())
 
     def _set_cmds(self, cmds):
         for cmd in cmds:
             if type(cmd) is ASTFCmdSend:
+                self.total_send_bytes += cmd.buf_len
                 cmd.index = ASTFProgram.buf_list.add(cmd.buf)
             self.fields['commands'].append(cmd)
 
     def _create_cmds_from_cap(self, cmds, init_side):
         new_cmds = []
         origin = init_side
+        tot_rcv_bytes = 0
+
         for cmd in cmds:
             if origin == "c":
                 new_cmd = ASTFCmdSend(cmd.payload)
                 origin = "s"
             else:
-                l = len(cmd.payload)
-                new_cmd = ASTFCmdRecv(l - 5)
+                # Server need to see total rcv bytes, and not amount for each packet
+                tot_rcv_bytes += len(cmd.payload)
+                new_cmd = ASTFCmdRecv(tot_rcv_bytes)
                 origin = "c"
             new_cmds.append(new_cmd)
         self._set_cmds(new_cmds)
@@ -238,6 +315,13 @@ class ASTFProgram(object):
 
 
 class ASTFIPGenDist(object):
+    """ 
+        .. code-block:: python
+
+            ip_gen_c = ASTFIPGenDist(ip_range=["16.0.0.0", "16.0.0.255"], distribution="seq")
+
+    """ 
+
     in_list = []
 
     @staticmethod
@@ -253,7 +337,7 @@ class ASTFIPGenDist(object):
         ASTFIPGenDist.in_list = []
 
     class Inner(object):
-        def __init__(self, ip_range=["16.0.0.1", "16.0.0.255"], distribution="seq"):
+        def __init__(self, ip_range, distribution="seq"):
             self.fields = {}
             self.fields['ip_start'] = ip_range[0]
             self.fields['ip_end'] = ip_range[1]
@@ -276,12 +360,41 @@ class ASTFIPGenDist(object):
         def distribution(self):
             return self.fields['distribution']
 
+        @property
+        def direction(self):
+            return self.fields['dir']
+
+        @direction.setter
+        def direction(self, direction):
+            self.fields['dir'] = direction
+
+        @property
+        def ip_offset(self):
+            return self.fields['ip_offset']
+
+        @ip_offset.setter
+        def ip_offset(self, ip_offset):
+            self.fields['ip_offset'] = ip_offset
+
         def to_json(self):
             return dict(self.fields)
 
-    def __init__(self, ip_range=["16.0.0.1", "16.0.0.255"], distribution="seq"):
+    def __init__(self, ip_range, distribution="seq"):
+
+        """ 
+        Define a ASTFIPGenDist 
+
+
+        :parameters:
+                  ip_range  : list of  min-max ip strings 
+
+                  distribution  : string 
+                      "seq" or "rand"
+                    
+        """
+
         ver_args = {"types":
-                    [{"name": "ip_range", 'arg': ip_range, "t": "ip range", "must": False},
+                    [{"name": "ip_range", 'arg': ip_range, "t": "ip range", "must": True},
                      ]}
         ArgVerify.verify(self.__class__.__name__, ver_args)
         distribution_vals = ["seq", "rand"]
@@ -308,12 +421,44 @@ class ASTFIPGenDist(object):
     def distribution(self):
         return self.in_list[self.index].distribution
 
+    @property
+    def direction(self):
+        return self.in_list[self.index].direction
+
+    @direction.setter
+    def direction(self, direction):
+        self.in_list[self.index].direction = direction
+
+    @property
+    def ip_offset(self):
+        return self.in_list[self.index].ip_offset
+
+    @ip_offset.setter
+    def ip_offset(self, ip_offset):
+        self.in_list[self.index].ip_offset = ip_offset
+
     def to_json(self):
         return {"index": self.index}
 
 
 class ASTFIPGenGlobal(object):
+    """ 
+        .. code-block:: python
+
+            ip_gen_c = ASTFIPGenGlobal(ip_offset="1.0.0.0")
+
+    """ 
+
     def __init__(self, ip_offset="1.0.0.0"):
+        """ 
+        Global properties for IP generator
+
+
+        :parameters:
+                  ip_offset  : offset for dual mask ports 
+
+        """
+
         ver_args = {"types":
                     [{"name": "ip_offset", 'arg': ip_offset, "t": "ip address", "must": False},
                      ]}
@@ -322,25 +467,55 @@ class ASTFIPGenGlobal(object):
         self.fields = {}
         self.fields['ip_offset'] = ip_offset
 
+    @property
+    def ip_offset(self):
+        return self.fields['ip_offset']
+
     def to_json(self):
         return dict(self.fields)
 
 
 class ASTFIPGen(object):
-    def __init__(self, glob=ASTFIPGenGlobal(),
-                 dist_client=ASTFIPGenDist(["16.0.0.1", "16.0.0.255"], distribution="seq"),
-                 dist_server=ASTFIPGenDist(["48.0.0.1", "48.0.255.255"], distribution="seq")):
+    """ 
+
+        .. code-block:: python
+
+            ip_gen_c = ASTFIPGenDist(ip_range=["16.0.0.0", "16.0.0.255"], distribution="seq")
+            ip_gen_s = ASTFIPGenDist(ip_range=["48.0.0.0", "48.0.255.255"], distribution="seq")
+            ip_gen = ASTFIPGen(glob=ASTFIPGenGlobal(ip_offset="1.0.0.0"),
+                               dist_client=ip_gen_c,
+                               dist_server=ip_gen_s)
+
+
+    """
+
+    def __init__(self, dist_client, dist_server, glob=ASTFIPGenGlobal()):
+        """ 
+        Define a ASTFIPGen generator 
+
+
+        :parameters:
+                  dist_client  : Client side ASTFIPGenDist  :class:`trex_astf_lib.trex_astf_client.ASTFIPGenDist`
+
+                  dist_server  : Server side ASTFIPGenDist  :class:`trex_astf_lib.trex_astf_client.ASTFIPGenDist`
+
+                  glob :  ASTFIPGenGlobal see :class:`trex_astf_lib.trex_astf_client.ASTFIPGenGlobal`
+        """
+
         ver_args = {"types":
                     [{"name": "glob", 'arg': glob, "t": ASTFIPGenGlobal, "must": False},
-                     {"name": "dist_client", 'arg': dist_client, "t": ASTFIPGenDist, "must": False},
-                     {"name": "dist_server", 'arg': dist_server, "t": ASTFIPGenDist, "must": False},
+                     {"name": "dist_client", 'arg': dist_client, "t": ASTFIPGenDist, "must": True},
+                     {"name": "dist_server", 'arg': dist_server, "t": ASTFIPGenDist, "must": True},
                      ]}
         ArgVerify.verify(self.__class__.__name__, ver_args)
 
         self.fields = {}
-        self.fields['global'] = glob
         self.fields['dist_client'] = dist_client
+        dist_client.direction = "c"
+        dist_client.ip_offset = glob.ip_offset
         self.fields['dist_server'] = dist_server
+        dist_server.direction = "s"
+        dist_server.ip_offset = glob.ip_offset
 
     @staticmethod
     def __str__():
@@ -361,6 +536,13 @@ class ASTFCluster(object):
 
 
 class ASTFTCPInfo(object):
+    """
+       .. code-block:: python
+
+            tcp_params = ASTFTCPInfo(window=32768)
+
+    """
+
     in_list = []
     DEFAULT_WIN = 32768
     DEFAULT_PORT = 80
@@ -405,6 +587,28 @@ class ASTFTCPInfo(object):
             return dict(self.fields)
 
     def __init__(self, window=None, options=None, port=None, file=None, side="c"):
+        """ 
+
+        :parameters:
+
+                  window  : uint32_t 
+                      TCP window size default 32KB
+
+                  side    : string 
+                        "c" or "s"
+
+                  file    : string 
+                        pcap file to learn the TCP information, in case given no need for other args
+
+                  port    :  uint16_t 
+                        destination port 
+
+                  options  : uint16_t 
+                        not used for now 
+
+
+        """
+
         side_vals = ["c", "s"]
         if side not in side_vals:
             raise ASTFError("Side must be one of {0}".format(side_vals))
@@ -472,7 +676,32 @@ class ASTFTCPInfo(object):
 
 
 class ASTFAssociationRule(object):
+    """
+       .. code-block:: python
+
+            # only port 
+            assoc=ASTFAssociationRule(port=81)
+
+            # port with range or destination ips 
+            assoc=ASTFAssociationRule(port=81,ip_start="48.0.0.1",ip_end="48.0.0,16")
+
+    """
+
     def __init__(self, port=80, ip_start=None, ip_end=None):
+        """ 
+
+        :parameters:
+                  port  : uint16_t 
+                      destination port 
+
+                  ip_start : string 
+                      stop ip range  
+
+                  ip_end   : string 
+                      stop ip range  
+
+        """
+
         ver_args = {"types":
                     [{"name": "ip_start", 'arg': ip_start, "t": "ip address", "must": False},
                      {"name": "ip_end", 'arg': ip_end, "t": "ip address", "must": False},
@@ -495,7 +724,22 @@ class ASTFAssociationRule(object):
 
 
 class ASTFAssociation(object):
+    """
+       .. code-block:: python
+
+            assoc=ASTFAssociationRule(port=81)
+
+    """
     def __init__(self, rules=ASTFAssociationRule()):
+        """ 
+
+        :parameters:
+                  rules  : ASTFAssociationRule see :class:`trex_astf_lib.trex_astf_client.ASTFAssociationRule`
+                       rule or rules list
+
+        """
+
+
         ver_args = {"types":
                     [{"name": "rules", 'arg': rules, "t": ASTFAssociationRule, "must": False, "allow_list": True},
                      ]}
@@ -533,6 +777,14 @@ class _ASTFTemplateBase(object):
             return prog_index
 
     @staticmethod
+    def get_total_send_bytes(ind):
+        return _ASTFTemplateBase.program_list[ind].total_send_bytes
+
+    @staticmethod
+    def num_programs():
+        return len(_ASTFTemplateBase.program_list)
+
+    @staticmethod
     def class_reset():
         _ASTFTemplateBase.program_list = []
         _ASTFTemplateBase.program_hash = {}
@@ -556,7 +808,7 @@ class _ASTFTemplateBase(object):
 
 
 class _ASTFClientTemplate(_ASTFTemplateBase):
-    def __init__(self, ip_gen=ASTFIPGen(), cluster=ASTFCluster(), program=None):
+    def __init__(self, ip_gen, cluster=ASTFCluster(), program=None):
         super(_ASTFClientTemplate, self).__init__(program=program)
         self.fields['ip_gen'] = ip_gen
         self.fields['cluster'] = cluster
@@ -569,10 +821,56 @@ class _ASTFClientTemplate(_ASTFTemplateBase):
 
 
 class ASTFTCPClientTemplate(_ASTFClientTemplate):
-    def __init__(self, ip_gen=ASTFIPGen(), cluster=ASTFCluster(), tcp_info=ASTFTCPInfo(), program=None,
+    """
+       One manual template
+
+       .. code-block:: python
+
+            # client commands
+            prog_c = ASTFProgram()
+            prog_c.send(http_req)
+            prog_c.recv(len(http_response))
+
+
+            # ip generator
+            ip_gen_c = ASTFIPGenDist(ip_range=["16.0.0.0", "16.0.0.255"], distribution="seq")
+            ip_gen_s = ASTFIPGenDist(ip_range=["48.0.0.0", "48.0.255.255"], distribution="seq")
+            ip_gen = ASTFIPGen(glob=ASTFIPGenGlobal(ip_offset="1.0.0.0"),
+                               dist_client=ip_gen_c,
+                               dist_server=ip_gen_s)
+
+            tcp_params = ASTFTCPInfo(window=32768)
+
+            # template
+            temp_c = ASTFTCPClientTemplate(program=prog_c, tcp_info=tcp_params, ip_gen=ip_gen)
+
+     """
+
+    def __init__(self, ip_gen, cluster=ASTFCluster(), tcp_info=ASTFTCPInfo(), program=None,
                  port=80, cps=1):
+        """ 
+
+        :parameters:
+                  ip_gen  : ASTFIPGen see :class:`trex_astf_lib.trex_astf_client.ASTFIPGen`
+                       generator 
+
+                  cluster :  ASTFCluster see :class:`trex_astf_lib.trex_astf_client.ASTFCluster`
+
+                  tcp_info : ASTFTCPInfo see :class:`trex_astf_lib.trex_astf_client.ASTFTCPInfo`
+
+                  program  : ASTFProgram see :class:`trex_astf_lib.trex_astf_client.ASTFProgram`
+                        L7 emulation program
+
+                  port     : uint16_t
+                        destination port
+
+                  cps      : float
+                        New connection per second rate
+
+        """
+
         ver_args = {"types":
-                    [{"name": "ip_gen", 'arg': ip_gen, "t": ASTFIPGen, "must": False},
+                    [{"name": "ip_gen", 'arg': ip_gen, "t": ASTFIPGen},
                      {"name": "cluster", 'arg': cluster, "t": ASTFCluster, "must": False},
                      {"name": "tcp_info", 'arg': tcp_info, "t": ASTFTCPInfo, "must": False},
                      {"name": "program", 'arg': program, "t": ASTFProgram}]
@@ -593,7 +891,34 @@ class ASTFTCPClientTemplate(_ASTFClientTemplate):
 
 
 class ASTFTCPServerTemplate(_ASTFTemplateBase):
+    """
+       One server side template
+
+       .. code-block:: python
+
+            # server commands
+            prog_s = ASTFProgram()
+            prog_s.recv(len(http_req))
+            prog_s.send(http_response)
+
+
+            # template
+            temp_s = ASTFTCPServerTemplate(program=prog_s, tcp_info=tcp_params)  # using default association
+
+     """
+
     def __init__(self, tcp_info=ASTFTCPInfo(), program=None, assoc=ASTFAssociation()):
+        """ 
+
+        :parameters:
+                  tcp_info : ASTFTCPInfo see :class:`trex_astf_lib.trex_astf_client.ASTFTCPInfo`
+
+                  program  : ASTFProgram see :class:`trex_astf_lib.trex_astf_client.ASTFProgram`
+                        L7 emulation program
+
+                  assoc    : ASTFAssociation see :class:`trex_astf_lib.trex_astf_client.ASTFAssociation`
+
+        """
         ver_args = {"types":
                     [{"name": "tcp_info", 'arg': tcp_info, "t": ASTFTCPInfo, "must": False},
                      {"name": "assoc", 'arg': assoc, "t": [ASTFAssociation, ASTFAssociationRule], "must": False},
@@ -613,7 +938,48 @@ class ASTFTCPServerTemplate(_ASTFTemplateBase):
 
 
 class ASTFCapInfo(object):
+    """ 
+
+        .. code-block:: python
+
+            ASTFCapInfo(file="../avl/delay_10_http_browsing_0.pcap",cps=1)
+
+            ASTFCapInfo(file="../avl/delay_10_http_browsing_0.pcap",l7_percent=10.0)
+
+            ASTFCapInfo(file="../avl/delay_10_http_browsing_0.pcap",l7_percent=10.0,port=8080)
+
+            ASTFCapInfo(file="../avl/delay_10_http_browsing_0.pcap",l7_percent=10.0,port=8080,ip_gen=Mygen)
+
+    """
+
+
+      
+
     def __init__(self, file=None, cps=None, assoc=None, ip_gen=None, port=None, l7_percent=None):
+        """ 
+        Define one template information based on pcap file analysis
+
+        :parameters:
+                  file  : string 
+                      pcap file name. Filesystem directory location is relative to the profile file in case it is not start with /
+
+                  cps  :  float 
+                       new connection per second rate
+
+                  assoc :  ASTFAssociation see :class:`trex_astf_lib.trex_astf_client.ASTFAssociation`
+                       rule for server association in default take the destination port from pcap file
+
+                  ip_gen  : ASTFIPGen see :class:`trex_astf_lib.trex_astf_client.ASTFIPGen`
+                      tuple generator for this template 
+
+                  port    : uint16_t 
+                      Override destination port, by default is taken from pcap 
+
+                  l7_percent :  float
+                        L7 stream bandwidth percent 
+
+        """
+
         ver_args = {"types":
                     [{"name": "file", 'arg': file, "t": str},
                      {"name": "assoc", 'arg': assoc, "t": [ASTFAssociation, ASTFAssociationRule], "must": False},
@@ -648,7 +1014,50 @@ class ASTFCapInfo(object):
 
 
 class ASTFTemplate(object):
+    """
+       One manual template
+
+       .. code-block:: python
+
+            # client commands
+            prog_c = ASTFProgram()
+            prog_c.send(http_req)
+            prog_c.recv(len(http_response))
+    
+            prog_s = ASTFProgram()
+            prog_s.recv(len(http_req))
+            prog_s.send(http_response)
+    
+            # ip generator
+            ip_gen_c = ASTFIPGenDist(ip_range=["16.0.0.0", "16.0.0.255"], distribution="seq")
+            ip_gen_s = ASTFIPGenDist(ip_range=["48.0.0.0", "48.0.255.255"], distribution="seq")
+            ip_gen = ASTFIPGen(glob=ASTFIPGenGlobal(ip_offset="1.0.0.0"),
+                               dist_client=ip_gen_c,
+                               dist_server=ip_gen_s)
+    
+            tcp_params = ASTFTCPInfo(window=32768)
+    
+            # template
+            temp_c = ASTFTCPClientTemplate(program=prog_c, tcp_info=tcp_params, ip_gen=ip_gen)
+            temp_s = ASTFTCPServerTemplate(program=prog_s, tcp_info=tcp_params)  # using default association
+            template = ASTFTemplate(client_template=temp_c, server_template=temp_s)
+
+     """
+
     def __init__(self, client_template=None, server_template=None):
+        """ 
+        Define a ASTF profile 
+
+        You should give either templates or cap_list (mutual exclusion). 
+
+        :parameters:
+                  client_template  : ASTFTCPClientTemplate see :class:`trex_astf_lib.trex_astf_client.ASTFTCPClientTemplate`
+                       client side template info
+
+                  server_template  :  ASTFTCPServerTemplate see :class:`trex_astf_lib.trex_astf_client.ASTFTCPServerTemplate`
+                       server side template info
+
+        """
         ver_args = {"types":
                     [{"name": "client_template", 'arg': client_template, "t": ASTFTCPClientTemplate},
                      {"name": "server_template", 'arg': server_template, "t": ASTFTCPServerTemplate}]
@@ -669,16 +1078,55 @@ class ASTFTemplate(object):
 
 # For future use
 class ASTFGlobal(object):
+    """ ASTFGlobal
+
+       place holder for future 
+
+
+    """
     pass
 
 
 class ASTFProfile(object):
-    def __init__(self, templates=None, glob=None, cap_list=None, default_ip_gen=ASTFIPGen()):
+    """ ASTF profile  
+
+       .. code-block:: python
+
+            ip_gen_c = ASTFIPGenDist(ip_range=["16.0.0.0", "16.0.0.255"], distribution="seq")
+            ip_gen_s = ASTFIPGenDist(ip_range=["48.0.0.0", "48.0.255.255"], distribution="seq")
+            ip_gen = ASTFIPGen(glob=ASTFIPGenGlobal(ip_offset="1.0.0.0"),
+                               dist_client=ip_gen_c,
+                               dist_server=ip_gen_s)
+    
+            return ASTFProfile(default_ip_gen=ip_gen,
+                                cap_list=[ASTFCapInfo(file="../avl/delay_10_http_browsing_0.pcap",cps=1)])
+
+    """
+    def __init__(self, default_ip_gen, templates=None, glob=None, cap_list=None):
+        """ 
+        Define a ASTF profile 
+
+        You should give either templates or cap_list (mutual exclusion). 
+
+        :parameters:
+                  default_ip_gen  : ASTFIPGen  :class:`trex_astf_lib.trex_astf_client.ASTFIPGen`
+                       tuple generator object 
+
+                  templates  :  ASTFTemplate see :class:`trex_astf_lib.trex_astf_client.ASTFTemplate`
+                       define a list of manual templates or one template 
+
+                  glob :  ASTFGlobal see :class:`trex_astf_lib.trex_astf_client.ASTFGlobal`
+                       global profile information  
+
+                  cap_list  : ASTFCapInfo see :class:`trex_astf_lib.trex_astf_client.ASTFCapInfo`
+                      define a list of pcap files list in case there is no  templates
+        """
+
         ver_args = {"types":
                     [{"name": "templates", 'arg': templates, "t": ASTFTemplate, "allow_list": True, "must": False},
                      {"name": "glob", 'arg': glob, "t": ASTFGlobal, "must": False},
                      {"name": "cap_list", 'arg': cap_list, "t": ASTFCapInfo, "allow_list": True, "must": False},
-                     {"name": "default_ip_gen", 'arg': default_ip_gen, "t": ASTFIPGen, "must": False}]
+                     {"name": "default_ip_gen", 'arg': default_ip_gen, "t": ASTFIPGen}]
                     }
         ArgVerify.verify(self.__class__.__name__, ver_args)
 
@@ -760,38 +1208,20 @@ class ASTFProfile(object):
         return json.dumps(ret, indent=4, separators=(',', ': '))
 
 
-if __name__ == '__main__':
-    cmd_list = []
-    cmd_list.append(ASTFCmdSend("aaaaaaaaaaaaaa"))
-    cmd_list.append(ASTFCmdSend("bbbbbbbb"))
-    cmd_list.append(ASTFCmdSend("aaaaaaaaaaaaaa"))
-    cmd_list.append(ASTFCmdReset())
-    my_prog_c = ASTFProgram(commands=cmd_list)
-    my_prog_s = ASTFProgram(file="/Users/ibarnea/src/trex-core/scripts/cap2/http_get.pcap", side="s")
-    ip_gen_c = ASTFIPGenDist(ip_range=["17.0.0.0", "17.255.255.255"], distribution="seq")
-    ip_gen_c2 = ASTFIPGenDist(ip_range=["17.0.0.0", "17.255.255.255"], distribution="seq")
-    ip_gen_s = ASTFIPGenDist(ip_range=["49.0.0.0", "49.255.255.255"], distribution="seq")
-    ip_gen_s2 = ASTFIPGenDist(ip_range=["200.0.0.0", "200.255.255.255"], distribution="seq")
-    ip_gen = ASTFIPGen(glob=ASTFIPGenGlobal(ip_offset="1.0.0.0"),
-                       dist_client=ip_gen_c,
-                       dist_server=ip_gen_s)
-    ip_gen2 = ASTFIPGen(glob=ASTFIPGenGlobal(ip_offset="1.0.0.0"),
-                        dist_client=ip_gen_c2,
-                        dist_server=ip_gen_s2)
-
-    tcp1 = ASTFTCPInfo(file="../../../../cap2/http_get.pcap", side="c")
-    tcp2 = ASTFTCPInfo(window=32768, options=0x2)
-
-    assoc_rule1 = ASTFAssociationRule(port=81, ip_start="1.1.1.1", ip_end="1.1.1.10", ip_type="dst")
-    assoc_rule2 = ASTFAssociationRule(port=90, ip_start="2.1.1.1", ip_end="2.1.1.10", ip_type="src")
-    assoc = ASTFAssociation(rules=[assoc_rule1, assoc_rule2])
-
-    temp_c = ASTFTCPClientTemplate(program=my_prog_c, tcp_info=tcp1, ip_gen=ip_gen)
-    temp_s = ASTFTCPServerTemplate(program=my_prog_s, tcp_info=tcp2, assoc=assoc)
-    template = ASTFTemplate(client_template=temp_c, server_template=temp_s)
-
-    profile = ASTFProfile(template)
-
-    f = open('/tmp/tcp_out.json', 'w')
-    print(profile.to_json())
-    f.write(str(profile.to_json()).replace("'", "\""))
+    def print_stats(self):
+        tot_bps = 0
+        tot_cps = 0
+        print ("Num buffers: {0}".format(ASTFProgram.buf_list.get_len()))
+        print ("Num programs: {0}".format(_ASTFTemplateBase.num_programs()))
+        for i in range(0, len(self.templates)):
+            print ("template {0}:".format(i))
+            d = self.templates[i].to_json()
+            c_prog_ind = d['client_template']['program_index']
+            s_prog_ind = d['server_template']['program_index']
+            tot_bytes = _ASTFTemplateBase.get_total_send_bytes(c_prog_ind) + _ASTFTemplateBase.get_total_send_bytes(s_prog_ind)
+            temp_cps = d['client_template']['cps']
+            temp_bps = tot_bytes * temp_cps * 8
+            print ("  total bytes:{0} cps:{1} bps(bytes * cps * 8):{2}".format(tot_bytes, temp_cps, temp_bps))
+            tot_bps += temp_bps
+            tot_cps += temp_cps
+        print("total for all templates - cps:{0} bps:{1}".format(tot_cps, tot_bps))

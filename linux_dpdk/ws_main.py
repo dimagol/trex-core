@@ -28,16 +28,16 @@ out = 'build_dpdk'
 b_path ="./build/linux_dpdk/"
 
 so_path = '../scripts/so'
-                          
+
 C_VER_FILE      = "version.c"
 H_VER_FILE      = "version.h"
 
-BUILD_NUM_FILE  = "../VERSION" 
+BUILD_NUM_FILE  = "../VERSION"
 USERS_ALLOWED_TO_RELEASE = ['hhaim']
 
 
 #######################################
-# utility for group source code 
+# utility for group source code
 ###################################
 
 orig_system = os.system
@@ -107,6 +107,7 @@ def options(opt):
     opt.add_option('--pkg-file', '--pkg_file', dest='pkg_file', default=False, action='store', help="Destination filename for 'pkg' option.")
     opt.add_option('--publish-commit', '--publish_commit', dest='publish_commit', default=False, action='store', help="Specify commit id for 'publish_both' option (Please make sure it's good!)")
     opt.add_option('--no-mlx', dest='no_mlx', default=False, action='store_true', help="don't use mlx5 dpdk driver. use with ./b configure --no-mlx. no need to run build with it")
+    opt.add_option('--with-ntacc', dest='with_ntacc', default=False, action='store_true', help="Use Napatech dpdk driver. Use with ./b configure --with-ntacc.")
     opt.add_option('--no-ver', action = 'store_true', help = "Don't update version file.")
     opt.add_option('--private', dest='private', action = 'store_true', help = "private publish, do not replace latest/be_latest image with this image")
 
@@ -181,6 +182,17 @@ def check_ofed(ctx):
     ctx.end_msg('Found needed version %s' % ofed_ver_show)
     return True
 
+@conf
+def check_ntapi(ctx):
+    ctx.start_msg('Checking for NTAPI')
+    ntapi_lib='/opt/napatech3/lib/libntapi.so'
+
+    if not os.path.isfile(ntapi_lib):
+        ctx.end_msg('not found', 'YELLOW')
+        return False
+
+    ctx.end_msg('Found needed NTAPI library')
+    return True
 
 def configure(conf):
     conf.load('g++')
@@ -188,6 +200,7 @@ def configure(conf):
     conf.find_program('ldd')
     conf.check_cxx(lib = 'z', errmsg = missing_pkg_msg(fedora = 'zlib-devel', ubuntu = 'zlib1g-dev'))
     no_mlx = conf.options.no_mlx
+    with_ntacc = conf.options.with_ntacc
 
     conf.env.NO_MLX = no_mlx
     if not no_mlx:
@@ -195,9 +208,16 @@ def configure(conf):
         if ofed_ok:
             conf.check_cxx(lib = 'ibverbs', errmsg = 'Could not find library ibverbs, will use internal version.', mandatory = False)
         else:
-            Logs.pprint('YELLOW', 'Warning: will use internal version of ibverbs. If you need to use Mellanox NICs, install OFED:\n' + 
+            Logs.pprint('YELLOW', 'Warning: will use internal version of ibverbs. If you need to use Mellanox NICs, install OFED:\n' +
                                   'https://trex-tgn.cisco.com/trex/doc/trex_manual.html#_mellanox_connectx_4_support')
 
+    conf.env.WITH_NTACC = with_ntacc
+    if with_ntacc:
+        ntapi_ok = conf.check_ntapi(mandatory = False)
+        if not ntapi_ok:
+          Logs.pprint('RED', 'Cannot find NTAPI. If you need to use Napatech NICs, install the Napatech driver:\n' +
+                                  'https://www.napatech.com/downloads/')
+          raise Exception("Cannot find libntapi");
 
 def getstatusoutput(cmd):
     """    Return (status, output) of executing cmd in a shell. Taken from Python3 subprocess.getstatusoutput"""
@@ -226,8 +246,12 @@ main_src = SrcGroup(dir='src',
              'utl_mbuf.cpp',
              'utl_dbl_human.cpp',
              'utl_counter.cpp',
+             'utl_policer.cpp',
+             'astf/astf_template_db.cpp',
              'stt_cp.cpp',
+             'trex_global.cpp',
              'bp_sim.cpp',
+             'trex_platform.cpp',
              'utl_term_io.cpp',
              'utl_port_map.cpp',
              'global_io_mode.cpp',
@@ -264,17 +288,19 @@ main_src = SrcGroup(dir='src',
              'pal/linux_dpdk/pal_utl.cpp',
              'pal/linux_dpdk/mbuf.cpp',
              'pal/common/common_mbuf.cpp',
-             'h_timer.cpp'
-
+             'h_timer.cpp',
+             'astf/json_reader.cpp',
+             'bp_sim_stf.cpp',
              ]);
 
 cmn_src = SrcGroup(dir='src/common',
-    src_list=[ 
+    src_list=[
         'basic_utils.cpp',
         'captureFile.cpp',
         'erf.cpp',
         'pcap.cpp',
-        'base64.cpp'
+        'base64.cpp',
+        'n_uniform_prob.cpp'
         ]);
 
 net_src = SrcGroup(dir='src/common/Network/Packet',
@@ -314,7 +340,7 @@ rpc_server_src = SrcGroup(dir='src/rpc-server/',
 
 
 ef_src = SrcGroup(dir='src/common',
-    src_list=[ 
+    src_list=[
         'ef/efence.cpp',
         'ef/page.cpp',
         'ef/print.cpp'
@@ -554,6 +580,13 @@ dpdk_src = SrcGroup(dir='src/dpdk/',
                  'lib/librte_ring/rte_ring.c',
             ]);
 
+ntacc_dpdk_src = SrcGroup(dir='src/dpdk',
+                src_list=[
+
+                 'drivers/net/ntacc/filter_ntacc.c',
+                 'drivers/net/ntacc/rte_eth_ntacc.c',
+            ]);
+
 mlx5_dpdk_src = SrcGroup(dir='src/dpdk/',
                 src_list=[
 
@@ -582,6 +615,9 @@ bp_dpdk =SrcGroups([
                 dpdk_src
                 ]);
 
+ntacc_dpdk =SrcGroups([
+                ntacc_dpdk_src
+                ]);
 mlx5_dpdk =SrcGroups([
                 mlx5_dpdk_src
                 ]);
@@ -596,7 +632,7 @@ bpf = SrcGroups([
 
 # this is the library dp going to falcon (and maybe other platforms)
 bp =SrcGroups([
-                main_src, 
+                main_src,
                 cmn_src ,
                 net_src ,
                 yaml_src,
@@ -658,7 +694,7 @@ includes_path =''' ../src/pal/linux_dpdk/
                    ../src/pal/linux_dpdk/dpdk1702/
                    ../src/pal/common/
                    ../src/
-                   
+
                    ../src/rpc-server/
                    ../src/stateless/cp/
                    ../src/stateless/dp/
@@ -670,7 +706,7 @@ includes_path =''' ../src/pal/linux_dpdk/
                    ../external_libs/zmq/include/
                    ../external_libs/json/
                    ../external_libs/bpf/
-                   
+
 
 ../src/dpdk/drivers/net/af_packet/
 ../src/dpdk/drivers/net/bnx2x/
@@ -687,6 +723,7 @@ includes_path =''' ../src/pal/linux_dpdk/
 ../src/dpdk/drivers/net/ixgbe/base/
 ../src/dpdk/drivers/net/mlx4/
 ../src/dpdk/drivers/net/mlx5/
+../src/dpdk/drivers/net/ntacc/
 ../src/dpdk/drivers/net/mpipe/
 ../src/dpdk/drivers/net/null/
 ../src/dpdk/drivers/net/pcap/
@@ -723,7 +760,7 @@ includes_path =''' ../src/pal/linux_dpdk/
 
 dpdk_includes_verb_path =''
 
-dpdk_includes_path =''' ../src/ 
+dpdk_includes_path =''' ../src/
                         ../src/pal/linux_dpdk/
                         ../src/pal/linux_dpdk/dpdk1702/
 ../src/dpdk/drivers/
@@ -745,6 +782,7 @@ dpdk_includes_path =''' ../src/
 ../src/dpdk/drivers/net/ixgbe/base/
 ../src/dpdk/drivers/net/mlx4/
 ../src/dpdk/drivers/net/mlx5/
+../src/dpdk/drivers/net/ntacc/
 ../src/dpdk/drivers/net/mpipe/
 ../src/dpdk/drivers/net/null/
 ../src/dpdk/drivers/net/pcap/
@@ -782,7 +820,7 @@ dpdk_includes_path =''' ../src/
 ../src/dpdk/lib/librte_port/
 ../src/dpdk/lib/librte_pipeline/
 ../src/dpdk/lib/librte_table/
-../src/dpdk/      
+../src/dpdk/
 ''';
 
 bpf_includes_path = '../external_libs/bpf ../external_libs/bpf/bpfjit'
@@ -813,7 +851,7 @@ class build_option:
 
     def __init__(self,platform,debug_mode,is_pie):
       self.mode     = debug_mode;   ##debug,release
-      self.platform = platform; #['32','64'] 
+      self.platform = platform; #['32','64']
       self.is_pie = is_pie
 
     def __str__(self):
@@ -838,10 +876,10 @@ class build_option:
 
     def isRelease (self):
         return ( self.mode  == RELEASE_);
-     
+
     def isPIE (self):
         return self.is_pie
-    
+
     def update_executable_name (self,name):
         return self.update_name(name,"-")
 
@@ -873,11 +911,17 @@ class build_option:
     def get_dpdk_target (self):
         return self.update_executable_name("dpdk");
 
+    def get_ntacc_target (self):
+        return self.update_executable_name("ntacc");
+
     def get_mlx5_target (self):
         return self.update_executable_name("mlx5");
 
     def get_mlx4_target (self):
         return self.update_executable_name("mlx4");
+
+    def get_ntaccso_target (self):
+        return self.update_executable_name("libntacc")+'.so';
 
     def get_mlx5so_target (self):
         return self.update_executable_name("libmlx5")+'.so';
@@ -887,10 +931,10 @@ class build_option:
 
     def get_bpf_target (self):
         return self.update_executable_name("bpf");
-        
+
     def get_bpfso_target (self):
         return self.update_executable_name("libbpf") + '.so';
-        
+
     def get_common_flags (self):
         if self.isPIE():
             flags = copy.copy(common_flags_old)
@@ -961,7 +1005,7 @@ def build_prog (bld, build_obj):
     #for obj in rte_libs:
     #    bld.read_shlib( name=obj , paths=[top+rte_lib_path] )
 
-    # add electric fence only for debug image  
+    # add electric fence only for debug image
     debug_file_list='';
     #if not build_obj.isRelease ():
     #    debug_file_list +=ef_src.file_list(top)
@@ -969,10 +1013,10 @@ def build_prog (bld, build_obj):
     bld.objects(
       features='c ',
       includes = dpdk_includes_path,
-      
+
       cflags   = (build_obj.get_c_flags()+DPDK_FLAGS ),
       source   = bp_dpdk.file_list(top),
-      target=build_obj.get_dpdk_target() 
+      target=build_obj.get_dpdk_target()
       );
 
     if bld.env.NO_MLX == False:
@@ -981,9 +1025,9 @@ def build_prog (bld, build_obj):
           includes = dpdk_includes_path+dpdk_includes_verb_path,
           cflags   = (build_obj.get_c_flags()+DPDK_FLAGS ),
           use =['ibverbs'],
-    
+
           source   = mlx5_dpdk.file_list(top),
-          target   = build_obj.get_mlx5_target() 
+          target   = build_obj.get_mlx5_target()
         )
 
         bld.shlib(
@@ -992,18 +1036,31 @@ def build_prog (bld, build_obj):
         cflags   = (build_obj.get_c_flags()+DPDK_FLAGS ),
         use =['ibverbs'],
         source   = mlx4_dpdk.file_list(top),
-        target   = build_obj.get_mlx4_target() 
+        target   = build_obj.get_mlx4_target()
        )
 
-    # build the BPF as a shared library    
+    if bld.env.WITH_NTACC == True:
+        bld.shlib(
+          features='c',
+          includes = dpdk_includes_path+dpdk_includes_verb_path,
+          cflags   = (build_obj.get_c_flags()+DPDK_FLAGS +
+            ['-I/opt/napatech3/include',
+             '-DNAPATECH3_LIB_PATH=\"/opt/napatech3/lib\"']),
+          use =['ntapi'],
+
+          source   = ntacc_dpdk.file_list(top),
+          target   = build_obj.get_ntacc_target()
+        )
+
+    # build the BPF as a shared library
     bld.shlib(features = 'c',
               includes = bpf_includes_path,
               cflags   = build_obj.get_c_flags() + ['-DSLJIT_CONFIG_AUTO=1'],
               source   = bpf.file_list(top),
               target   = build_obj.get_bpf_target())
-    
-    
-    bld.program(features='cxx cxxprogram', 
+
+
+    bld.program(features='cxx cxxprogram',
                 includes =includes_path,
                 cxxflags =(build_obj.get_cxx_flags()+['-std=gnu++11',]),
                 linkflags = build_obj.get_link_flags() ,
@@ -1025,8 +1082,8 @@ def post_build(bld):
     exec_p ="../scripts/"
     for obj in build_types:
         install_single_system(bld, exec_p, obj);
-        
-        
+
+
 
 def build(bld):
     global dpdk_includes_verb_path;
@@ -1055,7 +1112,7 @@ def build(bld):
 def build_info(bld):
     pass;
 
-    
+
 def do_create_link (src, name, where):
     '''
         creates a soft link
@@ -1063,31 +1120,36 @@ def do_create_link (src, name, where):
         'name'       - link name to be used
         'where'      - where to put the symbolic link
     '''
-    
+
     # verify that source exists
     if os.path.exists(src):
-        
+
         full_link = os.path.join(where, name)
-        
+
         if not os.path.lexists(full_link):
             rel_path = os.path.relpath(src, where)
             print('{0} --> {1}'.format(name, rel_path))
-            
+
             os.symlink(rel_path, full_link)
-                
+
 
 def install_single_system (bld, exec_p, build_obj):
-    
+
     o = 'build_dpdk/linux_dpdk/'
- 
+
     # executable
     do_create_link(src = os.path.realpath(o + build_obj.get_target()),
                    name = build_obj.get_target(),
                    where = exec_p)
-    
-    
-    # SO libraries below    
-    
+
+
+    # SO libraries below
+
+    # NTACC
+    do_create_link(src = os.path.realpath(o + build_obj.get_ntaccso_target()),
+                   name = build_obj.get_ntaccso_target(),
+                   where = so_path)
+
     # MLX5
     do_create_link(src = os.path.realpath(o + build_obj.get_mlx5so_target()),
                    name = build_obj.get_mlx5so_target(),
@@ -1103,7 +1165,7 @@ def install_single_system (bld, exec_p, build_obj):
                    name  = build_obj.get_bpfso_target(),
                    where = so_path)
 
-    
+
 
 def pre_build(bld):
     if not bld.options.no_ver:
@@ -1203,6 +1265,8 @@ files_list=[
             'bp-sim-64-debug',
             't-rex-64-debug-gdb',
             'stl-sim',
+            'astf-sim',
+            'astf-sim-utl',
             'find_python.sh',
             'run_regression',
             'run_functional_tests',
@@ -1216,7 +1280,7 @@ files_list=[
             'daemon_server'
             ];
 
-files_dir=['cap2','avl','cfg','ko','automation', 'external_libs', 'python-lib','stl','exp']
+files_dir=['cap2','avl','cfg','ko','automation', 'external_libs', 'python-lib','stl','exp','astf']
 
 
 class Env(object):
@@ -1227,7 +1291,7 @@ class Env(object):
             print("You should define $ %s" % name)
             raise Exception("Env error");
         return (s);
-    
+
     @staticmethod
     def get_release_path () :
         s= Env().get_env('TREX_LOCAL_PUBLISH_PATH');
@@ -1244,7 +1308,7 @@ class Env(object):
         s= Env().get_env('TREX_WEB_SERVER');
         return  s;
 
-    # extral web 
+    # extral web
     @staticmethod
     def get_trex_ex_web_key() :
         s= Env().get_env('TREX_EX_WEB_KEY');
@@ -1317,14 +1381,14 @@ def release(bld, custom_dir = None):
         os.system("cp %s %s " %(src_file,dest_file));
 
     for obj in files_dir:
-        src_file =  '../scripts/'+obj+'/' 
+        src_file =  '../scripts/'+obj+'/'
         dest_file = exec_p +'/'+obj+'/'
         os.system("cp -rv %s %s " %(src_file,dest_file));
         os.system("chmod 755 %s " %(dest_file));
 
     # copy .SO objects and resolve symbols
     os.system('cp -rL ../scripts/so {0}'.format(exec_p))
-    
+
     rel=get_build_num ()
 
     # create client package
