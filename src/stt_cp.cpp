@@ -24,6 +24,7 @@ limitations under the License.
 
 bool CSTTCpPerDir::Create(){
     m_tcp.Clear();
+    m_udp.Clear();
     m_ft.Clear();
     create_clm_counters();
     return(true);
@@ -34,24 +35,40 @@ void CSTTCpPerDir::Delete(){
 
 void CSTTCpPerDir::update_counters(){
     tcpstat_int_t *lpt=&m_tcp.m_sts;
+    udp_stat_int_t *lpt_udp=&m_udp.m_sts;
     CFlowTableIntStats * lpft=&m_ft.m_sts;
     
     m_tcp.Clear();
+    m_udp.Clear();
     m_ft.Clear();
     CGCountersUtl64 tcp((uint64_t *)lpt,sizeof(tcpstat_int_t)/sizeof(uint64_t));
+    CGCountersUtl64 udp((uint64_t *)lpt_udp,sizeof(udp_stat_int_t)/sizeof(uint64_t));
     CGCountersUtl32 ft((uint32_t *)lpft,sizeof(CFlowTableIntStats)/sizeof(uint32_t));
     int i;
     for (i=0; i<m_tcp_ctx.size(); i++) {
         CTcpPerThreadCtx* lpctx=m_tcp_ctx[i];
         CGCountersUtl64 tcp_ctx((uint64_t *)&lpctx->m_tcpstat.m_sts,sizeof(tcpstat_int_t)/sizeof(uint64_t));
+        CGCountersUtl64 udp_ctx((uint64_t *)&lpctx->m_udpstat.m_sts,sizeof(udp_stat_int_t)/sizeof(uint64_t));
         CGCountersUtl32 ft_ctx((uint32_t *)&lpctx->m_ft.m_sts,sizeof(CFlowTableIntStats)/sizeof(uint32_t));
         tcp+=tcp_ctx;
+        udp+=udp_ctx;
         ft+=ft_ctx;
+    }
+
+    uint64_t udp_active_flows=0;
+    if ( (lpt_udp->udps_connects+
+          lpt_udp->udps_accepts) > lpt_udp->udps_closed) {
+
+        udp_active_flows =  lpt_udp->udps_connects+
+                            lpt_udp->udps_accepts - 
+                            lpt_udp->udps_closed;
     }
 
     m_active_flows = lpt->tcps_connattempt + 
                      lpt->tcps_accepts  - 
-                     lpt->tcps_closed;
+                     lpt->tcps_closed +
+                     udp_active_flows;
+
 
     if (lpt->tcps_connects>lpt->tcps_closed) {
         m_est_flows = lpt->tcps_connects - 
@@ -59,6 +76,7 @@ void CSTTCpPerDir::update_counters(){
     }else{
         m_est_flows=0;
     }
+    m_est_flows+=udp_active_flows;
 
     /* total bytes sent */
     uint64_t total_tx_bytes = lpt->tcps_sndbyte_ok+lpt->tcps_sndrexmitbyte+lpt->tcps_sndprobe;
@@ -152,6 +170,10 @@ static void create_bar(CGTblClmCounters  * clm,
 // for errors
 #define TCP_S_ADD_CNT_E(f,help)  { create_sc(&m_clm,#f,help,&m_tcp.m_sts.f,false,true); }
 
+#define UDP_S_ADD_CNT(f,help)  { create_sc(&m_clm,#f,help,&m_udp.m_sts.f,false,false); }
+#define UDP_S_ADD_CNT_E(f,help)  { create_sc(&m_clm,#f,help,&m_udp.m_sts.f,false,true); }
+
+
 
 #define FT_S_ADD_CNT(f,help)  { create_sc_32(&m_clm,#f,help,&m_ft.m_sts.m_##f,false,false); }
 #define FT_S_ADD_CNT_Ex(s,f,help)  { create_sc_32(&m_clm,s,help,&m_ft.m_sts.m_##f,false,false); }
@@ -203,7 +225,7 @@ void CSTTCpPerDir::create_clm_counters(){
 
     TCP_S_ADD_CNT(tcps_preddat,"times hdr predict ok for data pkts ");
 
-    TCP_S_ADD_CNT_E(tcps_drops,"connections dropped");
+    TCP_S_ADD_CNT(tcps_drops,"connections dropped");
     TCP_S_ADD_CNT_E(tcps_conndrops,"embryonic connections dropped");
     TCP_S_ADD_CNT_E(tcps_timeoutdrop,"conn. dropped in rxmt timeout");
     TCP_S_ADD_CNT_E(tcps_rexmttimeo,"retransmit timeouts");
@@ -237,7 +259,7 @@ void CSTTCpPerDir::create_clm_counters(){
     TCP_S_ADD_CNT_E(tcps_rcvbyteafterwin,"bytes rcvd after window");
     TCP_S_ADD_CNT_E(tcps_rcvafterclose,"packets rcvd after close");
     TCP_S_ADD_CNT_E(tcps_rcvwinprobe,"rcvd window probe packets");
-    TCP_S_ADD_CNT_E(tcps_rcvdupack,"rcvd duplicate acks");
+    TCP_S_ADD_CNT(tcps_rcvdupack,"rcvd duplicate acks");
     TCP_S_ADD_CNT_E(tcps_rcvacktoomuch,"rcvd acks for unsent data");
     TCP_S_ADD_CNT_E(tcps_rcvwinupd,"rcvd window update packets");
     TCP_S_ADD_CNT_E(tcps_pawsdrop,"segments dropped due to PAWS");
@@ -250,16 +272,33 @@ void CSTTCpPerDir::create_clm_counters(){
     TCP_S_ADD_CNT_E(tcps_nombuf,"no mbuf for tcp - drop the packets");
 
     create_bar(&m_clm,"-");
+    create_bar(&m_clm,"UDP");
+    create_bar(&m_clm,"-");
+
+    UDP_S_ADD_CNT(udps_accepts,"connections accepted");
+    UDP_S_ADD_CNT(udps_connects,"connections established");  
+    UDP_S_ADD_CNT(udps_closed,"conn. closed (includes drops)");  
+    UDP_S_ADD_CNT(udps_sndbyte,"data bytes transmitted");
+    UDP_S_ADD_CNT(udps_sndpkt,"data packets transmitted");
+    UDP_S_ADD_CNT(udps_rcvbyte,"data bytes received");                                
+    UDP_S_ADD_CNT(udps_rcvpkt,"data packets received");
+    UDP_S_ADD_CNT_E(udps_keepdrops,"keepalive drop");
+    UDP_S_ADD_CNT_E(udps_nombuf,"no mbuf");
+    UDP_S_ADD_CNT_E(udps_pkt_toobig,"packets transmitted too big");
+
+
+    create_bar(&m_clm,"-");
     create_bar(&m_clm,"Flow Table");
     create_bar(&m_clm,"-");
 
     FT_S_ADD_CNT_Ex_E("err_cwf",err_client_pkt_without_flow,"client pkt without flow");
     FT_S_ADD_CNT_E(err_no_syn,"server first flow packet with no SYN");
     FT_S_ADD_CNT_E(err_len_err,"pkt with length error"); 
-    FT_S_ADD_CNT_E(err_no_tcp,"no tcp packet");
+    FT_S_ADD_CNT_E(err_fragments_ipv4_drop,"fragments_ipv4_drop"); /* frag is not supported */
+    FT_S_ADD_CNT_OK(err_no_tcp_udp,"no tcp/udp packet");
     FT_S_ADD_CNT_E(err_no_template,"server can't match L7 template");
     FT_S_ADD_CNT_E(err_no_memory,"No heap memory for allocating flows");
-    FT_S_ADD_CNT_Ex_E("err_dct",err_duplicate_client_tuple,"duplicate flow can't happen");
+    FT_S_ADD_CNT_Ex_E("err_dct",err_duplicate_client_tuple,"duplicate flow - more clients require ");
     FT_S_ADD_CNT_E(err_l3_cs,"ip checksum error");
     FT_S_ADD_CNT_E(err_l4_cs,"tcp/udp checksum error");
 

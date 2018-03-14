@@ -346,6 +346,8 @@ class CTRexTestConfiguringPlugin(Plugin):
                             help = 'Test name to run (without file, class etc.). Can choose several names splitted by comma.')
         parser.add_option('--no-dut-config', action = 'store_true',
                             help = 'Skip the config of DUT to save time. Implies --skip-clean.')
+        parser.add_option('--save-coredump', action = 'store_true',
+                            help = 'Save coredumps (if will be produced) via master daemon.')
 
 
     def configure(self, options, conf):
@@ -358,6 +360,7 @@ class CTRexTestConfiguringPlugin(Plugin):
         self.json_verbose   = options.json_verbose
         self.telnet_verbose = options.telnet_verbose
         self.no_daemon      = options.no_daemon
+        self.save_coredump  = options.save_coredump
         CTRexScenario.test  = options.test
         if self.no_daemon and (self.pkg or self.restart_daemon):
             fatal('You have specified both --no-daemon and either --pkg or --restart-daemon at same time.')
@@ -529,15 +532,14 @@ class CTRexTestConfiguringPlugin(Plugin):
         if self.functional or self.collect_only:
             return
         #CTRexScenario.is_init = False
-        if CTRexScenario.trex:
+        if CTRexScenario.trex and self.save_coredump:
             CTRexScenario.trex.master_daemon.save_coredump()
         if self.stateful:
             CTRexScenario.trex = None
         if self.stateless:
-            if self.no_daemon:
-                if CTRexScenario.stl_trex and CTRexScenario.stl_trex.is_connected():
-                    CTRexScenario.stl_trex.disconnect()
-            else:
+            if CTRexScenario.stl_trex and CTRexScenario.stl_trex.is_connected():
+                CTRexScenario.stl_trex.disconnect()
+            if not self.no_daemon:
                 CTRexScenario.trex.force_kill(False)
             CTRexScenario.stl_trex = None
 
@@ -572,6 +574,8 @@ if __name__ == "__main__":
     CTRexScenario.scripts_path  = get_trex_path()
     if not CTRexScenario.setup_dir:
         CTRexScenario.setup_dir = check_setup_path(os.path.join('setups', setup_dir))
+    if setup_dir and not CTRexScenario.setup_dir:
+        fatal('Could not find setup directory %s' % setup_dir)
 
 
     nose_argv = ['', '-s', '-v', '--exe', '--rednose', '--nologcapture']

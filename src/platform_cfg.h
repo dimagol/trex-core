@@ -172,6 +172,7 @@ public:
 public:
     void Dump(FILE *fd);
     void reset();
+    void limit_lowend();
 };
 
 
@@ -197,6 +198,7 @@ public:
         m_enable_zmq_pub=true;
         m_zmq_pub_port=4500;
         m_zmq_rpc_port = 4501;
+        m_is_lowend = false;
 
 
         m_telnet_exist=false;
@@ -238,6 +240,8 @@ public:
     uint16_t                      m_telnet_port;
 
     uint16_t                      m_zmq_rpc_port;
+
+    bool                          m_is_lowend;
 
     bool                       m_mac_info_exist;
     std::vector <CMacYamlInfo> m_mac_info;

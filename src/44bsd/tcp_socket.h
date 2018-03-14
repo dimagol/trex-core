@@ -41,6 +41,10 @@
 #include <stdio.h>
 #include <string.h>
 #include "mbuf.h"
+#include "h_timer.h"
+#include <stdarg.h>
+#include <stdlib.h>
+
 
 
 struct  sockbuf {
@@ -248,21 +252,32 @@ typedef enum { tcTX_BUFFER             =1,   /* send buffer of   CMbufBuffer */
                tcDELAY                 =2,   /* delay some time */
                tcRX_BUFFER             =3,   /* enable/disable Rx counters */
                tcRESET                 =4,   /* explicit reset */
+               tcDONT_CLOSE            =5,   /* wait for reset */
+               tcCONNECT_WAIT          =6,   /* wait for the connection, should be the first command */
+               tcDELAY_RAND            =7,   /* delay random min-max*/
+               tcSET_VAR               =8,   /* set value to var */
+               tcJMPNZ                 =9,   /* jump in case var in not zero */           
+               tcTX_PKT                =10,  /* UDP send packet */ 
+               tcRX_PKT                =11,  /* check # pkts */
+               tcKEEPALIVE             =12,  /* set keep alive */
+               tcCLOSE_PKT             =13,  /* close connection for udp */ 
+
                tcNO_CMD                =255  /* explicit reset */
 } tcp_app_cmd_enum_t;
+
+
 
 typedef uint8_t tcp_app_cmd_t;
 
 
 
 /* CMD == tcTX_BUFFER*/
-struct CTcpAppCmdTxBuffer {
+struct CEmulAppCmdTxBuffer {
     CMbufBuffer *   m_buf;
 };
 
 /* CMD == tcRX_BUFFER */
-struct CTcpAppCmdRxBuffer {
-
+struct CEmulAppCmdRxBuffer {
     enum {
             rxcmd_NONE      = 0,
             rxcmd_CLEAR     = 1,
@@ -270,39 +285,87 @@ struct CTcpAppCmdRxBuffer {
             rxcmd_DISABLE_RX   =4
 
     };
-
     uint32_t        m_flags;
     uint32_t        m_rx_bytes_wm;
 };
 
-struct CTcpAppCmdDelay {
-    uint64_t     m_usec_delay;
+struct CEmulAppCmdDelay {
+    uint32_t     m_ticks;
+};
+
+//tcDELAY_RAND
+struct CEmulAppCmdDelayRnd {
+    uint32_t     m_min_ticks;
+    uint32_t     m_max_ticks;
+};
+
+//tcSET_VAR
+struct CEmulAppCmdSetVar {
+    uint8_t     m_var_id; /* 2 vars*/
+    uint32_t    m_val;
+};
+
+//tcJMPNZ
+struct CEmulAppCmdJmpNZ {
+    uint8_t     m_var_id; /* 2 vars*/
+    int         m_offset; /* command */
+};
+
+/* tcTX_PKT . write pkt. valid for UDP only, should be smaller than MTU */
+struct CEmulAppCmdTxPkt {
+    CMbufBuffer *   m_buf;
+};
+
+/* CMD == tcRX_PKT */
+struct CEmulAppCmdRxPkt {
+    enum {
+            rxcmd_NONE      = 0,
+            rxcmd_CLEAR     = 1,
+            rxcmd_WAIT      = 2,
+            rxcmd_DISABLE_RX   =4
+
+    };
+    uint32_t        m_flags;
+    uint32_t        m_rx_pkts;
+};
+
+struct CEmulAppCmdKeepAlive {
+    uint64_t        m_keepalive_msec; /* set keepalive in msec */
 };
 
 
 /* Commands read-only  */
-struct CTcpAppCmd {
+struct CEmulAppCmd {
 
     tcp_app_cmd_t     m_cmd;
 
     union {
-        CTcpAppCmdTxBuffer  m_tx_cmd;
-        CTcpAppCmdRxBuffer  m_rx_cmd;
-        CTcpAppCmdDelay     m_delay_cmd;
+        CEmulAppCmdTxBuffer  m_tx_cmd;
+        CEmulAppCmdRxBuffer  m_rx_cmd;
+        CEmulAppCmdDelay     m_delay_cmd;
+        CEmulAppCmdDelayRnd  m_delay_rnd;
+        CEmulAppCmdSetVar    m_var;
+        CEmulAppCmdJmpNZ     m_jmpnz;
+        CEmulAppCmdTxPkt     m_tx_pkt;
+        CEmulAppCmdRxPkt     m_rx_pkt;   
+        CEmulAppCmdKeepAlive m_keepalive;   
+
     } u;
 public:
     void Dump(FILE *fd);
 };
 
-typedef std::vector<CTcpAppCmd> tcp_app_cmd_list_t;
+typedef std::vector<CEmulAppCmd> tcp_app_cmd_list_t;
 
 
 class CTcpFlow;
+class CUdpFlow;
 class CTcpPerThreadCtx;
 
 /* Api from application to TCP */
-class CTcpAppApi {
+class CEmulAppApi {
 public:
+    /* TCP API */
 
     /* get maximum tx queue space */
     virtual uint32_t get_tx_max_space(CTcpFlow * flow)=0;
@@ -318,19 +381,32 @@ public:
     virtual void tx_tcp_output(CTcpPerThreadCtx * ctx,
                                CTcpFlow *         flow)=0;
 
-    virtual void tcp_delay(uint64_t usec)=0;
+public:
+    virtual void disconnect(CTcpPerThreadCtx * ctx,
+                            CTcpFlow *         flow)=0;
+
+public:
+    /* UDP API */
+    virtual void send_pkt(CUdpFlow *         flow,
+                          CMbufBuffer *      buf
+                          )=0;
+
+    virtual void set_keepalive(CUdpFlow *         flow,
+                               uint64_t           msec
+                               )=0;
 
 };
 
 /* read-only program, many flows point to this program */
-class  CTcpAppProgram {
+class  CEmulAppProgram {
 
 public:
-    ~CTcpAppProgram(){ 
+    ~CEmulAppProgram(){ 
         m_cmds.clear();
+        m_stream=true;
     }
 
-    void add_cmd(CTcpAppCmd & cmd);
+    void add_cmd(CEmulAppCmd & cmd);
 
     void Dump(FILE *fd);
 
@@ -338,11 +414,24 @@ public:
         return (m_cmds.size());
     }
 
-    CTcpAppCmd * get_index(uint32_t index){
+    CEmulAppCmd * get_index(uint32_t index){
         return (&m_cmds[index]);
     }
 
+    bool sanity_check(std::string & err);
+    bool is_stream(){
+        return(m_stream);
+    }
+
+    void set_stream(bool stream){
+        m_stream = stream;
+    }
 private:
+    bool is_common_commands(tcp_app_cmd_t cmd_id);
+    bool is_udp_commands(tcp_app_cmd_t cmd_id);
+
+private:
+    bool                   m_stream;
     tcp_app_cmd_list_t     m_cmds; 
 };
 
@@ -355,7 +444,9 @@ typedef enum { te_SOISCONNECTING  =17,
                te_SOWWAKEUP   ,
                te_SORWAKEUP   ,
                te_SOISDISCONNECTING,
-               te_SOISDISCONNECTED 
+               te_SOISDISCONNECTED,
+               te_SOOTHERISDISCONNECTING /* other disconnected */
+
 } tcp_app_events_enum_t;
 
 typedef uint8_t tcp_app_events_t;
@@ -363,47 +454,84 @@ typedef uint8_t tcp_app_events_t;
 std::string get_tcp_app_events_name(tcp_app_events_t event);
 
 
-typedef enum { te_NONE     =0,
-               te_SEND     =17,   
-               te_WAIT_RX  =18,      
+typedef enum { te_NONE     =0,    
+               te_SEND     =17, /* sending trafic task could be long*/   
+               te_WAIT_RX  =18, /* wait for traffic to be Rx */     
                te_DELAY    =19,      
 } tcp_app_state_enum_t;
 
 typedef uint8_t tcp_app_state_t;
 
 
-class CTcpApp  {
+class CEmulApp  {
 public:
+    enum {
+        apVAR_NUM_SIZE =2
+    };
 
     /* flags */
     enum {
-            taINTERRUPT   = 1,
-            taRX_DISABLED = 2
+            taINTERRUPT   =         0x1,
+            taRX_DISABLED =         0x2,
+            taTIMER_INIT_WAS_DONE=  0x4,
+            taDO_DPC_DISCONNECT =   0x8,
+            taDO_WAIT_FOR_CLOSE = 0x10,
+            taDO_DPC_CLOSE =      0x20,
+            taCONNECTED         = 0x40,
+            taDO_WAIT_CONNECTED = 0x80,
+            taDO_DPC_NEXT       = 0x100,
+            taUDP_FLOW          = 0x200,
+
+
+            ta_DPC_ANY          = (taDO_DPC_NEXT  |
+                                   taDO_DPC_CLOSE |
+                                   taDO_DPC_DISCONNECT),
+
+            taDO_RX_CLEAR       = 0x400,
+            taLOG_ENABLE        = 0x800,
+
     };
 
 
 
-    CTcpApp() {
+    CEmulApp() {
         m_flow = (CTcpFlow *)0;
         m_ctx =(CTcpPerThreadCtx *)0;
-        m_api=(CTcpAppApi *)0;
+        m_api=(CEmulAppApi *)0;
         m_tx_active =0;
-        m_program =(CTcpAppProgram *)0;
+        m_program =(CEmulAppProgram *)0;
         m_flags=0;
         m_state =te_NONE;
         m_debug_id=0;
-        m_pad=0;
         m_cmd_index=0;
         m_tx_offset=0;
         m_tx_residue =0;
         m_cmd_rx_bytes=0;
         m_cmd_rx_bytes_wm=0;
+        m_vars[0]=0; /* unroll*/
+        m_vars[1]=0;
+        assert(apVAR_NUM_SIZE==2);
     }
 
-    virtual ~CTcpApp(){
+    virtual ~CEmulApp(){
+        force_stop_timer();
+    }
+
+    static uint32_t timer_offset(void){
+        CEmulApp *lp=0;
+        return ((uintptr_t)&lp->m_timer);
     }
 
 public:
+
+    void set_udp_flow(){
+            m_flags|=taUDP_FLOW;
+    }
+
+    bool is_udp_flow(){
+        return ((m_flags &taUDP_FLOW)?true:false);
+    }
+
     /* inside the Rx */
     void set_interrupt(bool enable){
         if (enable){
@@ -415,6 +543,78 @@ public:
 
     bool get_interrupt(){
         return ((m_flags &taINTERRUPT)?true:false);
+    }
+
+    
+    void set_rx_clear(bool enable){
+        if (enable){
+            m_flags|=taDO_RX_CLEAR;
+        }else{
+            m_flags&=(~taDO_RX_CLEAR);
+        }
+    }
+
+    void set_log_enable(bool enable){
+        if (enable){
+            m_flags|=taLOG_ENABLE;
+        }else{
+            m_flags&=(~taLOG_ENABLE);
+        }
+    }
+    bool is_log_enable(){
+        return ((m_flags &taLOG_ENABLE)?true:false);
+    }
+    
+
+    bool get_rx_clear(){
+        return ((m_flags &taDO_RX_CLEAR)?true:false);
+    }
+
+    bool get_timer_init_done(){
+        return ((m_flags &taTIMER_INIT_WAS_DONE)?true:false);
+    }
+
+    void set_timer_init_done(bool enable){
+        if (enable){
+            m_flags|=taTIMER_INIT_WAS_DONE;
+        }else{
+            m_flags&=(~taTIMER_INIT_WAS_DONE);
+        }
+    }
+
+    bool get_any_dpc(){
+        return ((m_flags &ta_DPC_ANY)?true:false);
+    }
+
+    bool get_do_disconnect(){
+        return ((m_flags &taDO_DPC_DISCONNECT)?true:false);
+    }
+
+    void set_disconnect(bool enable){
+        if (enable) {
+            m_flags|=taDO_DPC_DISCONNECT;
+        }else{
+            m_flags&=(~taDO_DPC_DISCONNECT);
+        }
+    }
+
+    void check_dpc_next(){
+        if (m_flags &taDO_DPC_NEXT) {
+            m_flags &=(~taDO_DPC_NEXT);
+            next();
+        }
+    }
+
+    bool get_do_do_close(){
+        return ((m_flags &taDO_DPC_CLOSE)?true:false);
+    }
+
+    void set_do_close(bool enable){
+        if (enable) {
+            m_flags|=taDO_DPC_CLOSE;
+        }else{
+            m_flags&=(~taDO_DPC_CLOSE);
+        }
     }
 
     void set_rx_disabled(bool disabled){
@@ -433,7 +633,8 @@ public:
         return ((m_flags &taRX_DISABLED)?true:false);
     }
 
-    
+
+    void run_dpc_callbacks();
 
 public:
 
@@ -445,11 +646,11 @@ public:
         return(m_debug_id);
     }
 
-    void set_bh_api(CTcpAppApi * api){
+    void set_bh_api(CEmulAppApi * api){
         m_api =api;
     }
 
-    void set_program(CTcpAppProgram * prog){
+    void set_program(CEmulAppProgram * prog){
         m_program = prog;
     }
 
@@ -458,6 +659,17 @@ public:
         m_ctx = ctx;
         m_flow = flow;
     }
+
+    void set_udp_flow_ctx(CTcpPerThreadCtx *  ctx,
+                          CUdpFlow *          flow){
+        m_ctx = ctx;
+        m_flow = (CTcpFlow*)flow;
+    }
+
+    CUdpFlow *   get_udp_flow(){
+        return((CUdpFlow *)m_flow);
+    }
+
 
 public:
 
@@ -486,31 +698,85 @@ public:
     virtual int on_bh_rx_bytes(uint32_t rx_bytes,
                                struct rte_mbuf * m_mbuf);
 
+    /* for pkt_base flows */
+    virtual int on_bh_rx_pkts(uint32_t rx_bytes,
+                               struct rte_mbuf * m_mbuf);
+
+
     virtual void on_bh_event(tcp_app_events_t event);
+
+    virtual void do_disconnect(); 
+
+    virtual void do_close();
+
+    void on_tick();
+
+private:
+    /* log support */
+#ifdef _DEBUG
+#define EMUL_LOG(cmd, fmt, args...) \
+	    if (is_log_enable()) { emul_log(cmd,"EMUL_LOG: " fmt "", ## args); }
+#else
+#define EMUL_LOG(cmd,fmt, args...) do { } while(0)
+#endif
+
+#ifdef _DEBUG
+    int emul_log(CEmulAppCmd * cmd,const char *format, ...){
+        va_list ap;
+        int ret;
+
+        va_start(ap, format);
+        ret = vfprintf(stdout, format, ap);
+        if (cmd) {
+            cmd->Dump(stdout);
+        }
+        fflush(stdout);
+        va_end(ap);
+        return ret;
+    }
+#endif
+
 
 private:
 
-    void process_cmd(CTcpAppCmd * cmd);
+    void check_rx_pkt_condition();
+
+    void process_cmd(CEmulAppCmd * cmd);
+
+    void run_cmd_delay_rand(htw_ticks_t min_ticks,
+                            htw_ticks_t max_ticks);
+
+    void run_cmd_delay(htw_ticks_t ticks);
 
     inline void check_rx_condition(){
         if (m_cmd_rx_bytes>= m_cmd_rx_bytes_wm) {
+            if (get_rx_clear()){
+                m_cmd_rx_bytes=0;
+                set_rx_clear(false);
+            }
+            EMUL_LOG(0, "ON_RX [%d]- NEXT \n",m_debug_id);
             next();
         }
     }
 
-    void tcp_close();
+    void tcp_udp_close();
+
+    void force_stop_timer();
 
 
 private:
-    CTcpFlow *             m_flow;
-    CTcpPerThreadCtx *     m_ctx;
-    CTcpAppApi *           m_api; 
-    CMbufBuffer *          m_tx_active;
-    CTcpAppProgram       * m_program;
-    uint8_t                m_flags;
+    /* cache line 0 */
+    CTcpFlow *              m_flow;
+    CTcpPerThreadCtx *      m_ctx;
+    CEmulAppApi *           m_api; 
+    CMbufBuffer *           m_tx_active;
+
+    /* cache line 1 */
+    CEmulAppProgram       * m_program;
+
+    uint16_t               m_flags;
     tcp_app_state_t        m_state;
     uint8_t                m_debug_id;
-    uint8_t                m_pad;
 
     uint32_t               m_cmd_index; /* the index of current command */
     uint32_t               m_tx_offset; /* in case of TX tcTX_BUFFER command, offset into the buffer */
@@ -519,6 +785,11 @@ private:
     uint32_t               m_cmd_rx_bytes;
     uint32_t               m_cmd_rx_bytes_wm; /* water mark to check */
 
+    /* cache line 2 */
+    CHTimerObj              m_timer;
+
+    /* cache line 3 */
+    uint32_t                m_vars[apVAR_NUM_SIZE];
 };
 
 
@@ -584,9 +855,15 @@ struct tcp_socket {
     struct  sockbuf so_rcv;
     CTcpSockBuf     so_snd;
 
-    CTcpApp  *      m_app; /* call back pointer */
+    CEmulApp  *      m_app; /* call back pointer */
 };
 
+
+inline void check_defer_functions(CEmulApp  *   app){
+    if (unlikely(app->get_any_dpc())){
+        app->run_dpc_callbacks();
+    }
+}
 
 inline void CTcpSockBuf::sbdrop(struct tcp_socket *so,
             int len){

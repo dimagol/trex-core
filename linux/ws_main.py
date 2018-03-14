@@ -18,6 +18,7 @@ from waflib import Logs
 top = '../'
 out = 'build'
 b_path ="./build/linux/"
+march = os.uname()[4]
 
 REQUIRED_CC_VERSION = "4.7.0"
 SANITIZE_CC_VERSION = "4.9.0"
@@ -196,6 +197,9 @@ main_src = SrcGroup(dir='src',
             '44bsd/tcp_socket.cpp',
             '44bsd/tcp_dpdk.cpp',
             '44bsd/sim_cs_tcp.cpp',
+            '44bsd/sch_rampup.cpp',
+            '44bsd/udp.cpp',
+
             'utl_dbl_human.cpp',
             'utl_counter.cpp',
             'utl_policer.cpp',
@@ -223,7 +227,6 @@ main_src = SrcGroup(dir='src',
              'pkt_gen.cpp',
              'timer_wheel_pq.cpp',
              'time_histogram.cpp',
-             'utl_json.cpp',
              'utl_cpuu.cpp',
              'utl_ip.cpp',
              'msg_manager.cpp',
@@ -431,7 +434,7 @@ includes_path =''' ../src/pal/linux/
                    ../src/stx/common/rx/
                    
                    ../external_libs/json/
-                   ../external_libs/zmq/include/
+                   ../external_libs/zmq-'''+ march +'''/include/
                    ../external_libs/yaml-cpp/include/
                    ../external_libs/bpf/
               ''';
@@ -444,13 +447,16 @@ RELEASE_    = "release"
 DEBUG_      = "debug"
 PLATFORM_64 = "64"
 PLATFORM_32 = "32"
+PLATFORM_x86 = "x86"
+PLATFORM_x86_64 = "x86_64"
+PLATFORM_aarch64 = "aarch64"
 
 
 class build_option:
 
-    def __init__(self, name, src, platform, debug_mode, is_pie, use = [], flags = [], rpath = []):
+    def __init__(self, name, src, debug_mode, is_pie, use = [], flags = [], rpath = []):
       self.mode     = debug_mode;   ##debug,release
-      self.platform = platform; #['32','64'] 
+      self.platform = march  # aarch64 or x86_64
       self.is_pie = is_pie
       self.name = name
       self.src = src
@@ -475,8 +481,14 @@ class build_option:
     def toExe(self,name,full_path = True):
         return (self.lib_name(name,full_path));
 
+    def isIntelPlatform (self):
+        return ( self.platform == PLATFORM_x86 or self.platform == PLATFORM_x86_64)
+
+    def isArmPlatform (self):
+        return ( self.platform == PLATFORM_aarch64)
+
     def is64Platform (self):
-        return ( self.platform == PLATFORM_64);
+        return ( self.platform == PLATFORM_x86_64 or self.platform == PLATFORM_aarch64)
 
     def isRelease (self):
         return ( self.mode  == RELEASE_);
@@ -508,10 +520,12 @@ class build_option:
 
     def cxxcomp_flags (self,flags):
         result = copy.copy(flags);
-        if self.is64Platform () :
-            result+=['-m64'];
-        else:
-            result+=['-m32'];
+
+        if self.isIntelPlatform():
+            if self.is64Platform () :
+                result+=['-m64'];
+            else:
+                result+=['-m32'];
 
         if self.isRelease () :
             result+=['-O3'];
@@ -554,11 +568,12 @@ class build_option:
 
         #platform depended flags
 
-        if self.is64Platform():
-            base_flags += ['-m64']
-        else:
-            base_flags += ['-m32']
-            base_flags += ['-lrt']
+        if self.isIntelPlatform():
+            if self.is64Platform():
+                base_flags += ['-m64']
+            else:
+                base_flags += ['-m32']
+                base_flags += ['-lrt']
 
         if self.isPIE():
             base_flags += ['-pie', '-DPATCH_FOR_PIE']
@@ -570,11 +585,11 @@ class build_option:
 
 
 build_types = [
-               build_option(name = "bp-sim", src = bp, use = [''],debug_mode= DEBUG_, platform = PLATFORM_64, is_pie = False,
+               build_option(name = "bp-sim", src = bp, use = [''],debug_mode= DEBUG_, is_pie = False,
                             flags = ['-Wall', '-Werror', '-Wno-sign-compare', '-Wno-strict-aliasing'],
                             rpath = ['so']),
 
-               build_option(name = "bp-sim", src = bp, use = [''],debug_mode= RELEASE_,platform = PLATFORM_64, is_pie = False,
+               build_option(name = "bp-sim", src = bp, use = [''],debug_mode= RELEASE_, is_pie = False,
                             flags = ['-Wall', '-Werror', '-Wno-sign-compare', '-Wno-strict-aliasing'],
                             rpath = ['so']),
 

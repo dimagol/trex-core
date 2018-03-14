@@ -16,6 +16,7 @@ import argparse
 import os
 import sys
 import subprocess
+import re
 
 DEFAULT_OUT_JSON_FILE = "/tmp/astf.json"
 
@@ -46,6 +47,34 @@ def get_valgrind():
     return(valgrind_exe);
 
 
+def decode_tunables (tunable_str):
+    tunables = {}
+
+    # split by comma to tokens
+    tokens = tunable_str.split(',')
+
+    # each token is of form X=Y
+    for token in tokens:
+        m = re.search('(\S+)=(.+)', token)
+        if not m:
+            raise argparse.ArgumentTypeError("bad syntax for tunables: {0}".format(token))
+        val = m.group(2)           # string
+        if val.startswith(("'", '"')) and val.endswith(("'", '"')) and len(val) > 1: # need to remove the quotes from value
+            val = val[1:-1]
+        elif val.startswith('0x'): # hex
+            val = int(val, 16)
+        else:
+            try:
+                if '.' in val:     # float
+                    val = float(val)
+                else:              # int
+                    val = int(val)
+            except:
+                pass
+        tunables[m.group(1)] = val
+
+    return tunables
+
 
 
 def execute_bp_sim(opts):
@@ -67,6 +96,9 @@ def execute_bp_sim(opts):
         valgrind_str = get_valgrind() +' --leak-check=full --error-exitcode=1 --show-reachable=yes '
         valgrind = valgrind_str.split();
         exe = valgrind + exe
+
+    if opts.emul_debug:
+         exe += ["--astf-emul-debug"]
 
     if opts.pcap:
         exe += ["--pcap"]
@@ -148,9 +180,17 @@ def setParserOptions():
                         help="Print expected usage statistics on TRex server (memory, bps,...) if this file will be used.",
                         action="store_true")
 
+    parser.add_argument('-e', '--emul-debug',
+                        help="emulation debug",
+                        action="store_true")
+
     parser.add_argument('-v', '--verbose',
                         action="store_true",
                         help="Print output to screen")
+
+    parser.add_argument('--dev',
+                        action="store_true",
+                        help="Deveoper mode")
 
     parser.add_argument('--full',
                         action="store_true",
@@ -184,6 +224,12 @@ def setParserOptions():
                        action="store_true",
                        default=False)
 
+    parser.add_argument('-t',
+                        help = 'sets tunable for a profile',
+                        dest = 'tunables',
+                        default = None,
+                        type = decode_tunables)
+
     return parser
 
 
@@ -208,11 +254,15 @@ def main(args=None):
         sys.exit(100)
 
     cl = prof.register()
-    try:
-        profile = cl.get_profile()
-    except Exception as e:
-        print (e)
-        sys.exit(100)
+    tun=opts.tunables if opts.tunables else {};
+    if opts.dev:
+        profile = cl.get_profile(**tun)
+    else:
+        try:
+            profile = cl.get_profile(**tun)
+        except Exception as e:
+            print (e)
+            sys.exit(100)
 
     if opts.json:
         print(profile.to_json())
@@ -256,6 +306,7 @@ def execute_with_chdir (opts):
     finally:
         os.chdir(cwd)
 
-        
+
 if __name__ == '__main__':
     main()
+

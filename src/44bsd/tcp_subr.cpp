@@ -233,29 +233,16 @@ struct tcpcb * tcp_disconnect(CTcpPerThreadCtx * ctx,
 }
 
 
-void CTcpFlow::learn_ipv6_headers_from_network(IPv6Header * net_ipv6){
-
-    tcpcb  * tp=&m_tcp;
-    assert(tp->is_ipv6==1);
-    uint8_t * p=tp->template_pkt;
-    IPv6Header *ipv6=(IPv6Header *)(p+tp->offset_ip);
-
-    ipv6->setSourceIpv6Raw((uint8_t*)&net_ipv6->myDestination[0]);
-    ipv6->setDestIpv6Raw((uint8_t*)&net_ipv6->mySource[0]);
-
-    /* recalculate */
-    if (tp->m_offload_flags & TCP_OFFLOAD_TX_CHKSUM){
-        tp->l4_pseudo_checksum = rte_ipv6_phdr_cksum((struct ipv6_hdr *)ipv6,(PKT_TX_IPV6 | PKT_TX_TCP_CKSUM));
-    }else{
-        tp->l4_pseudo_checksum=0;
-    }
-}
-
-
-
 void CTcpFlow::init(){
     /* build template */
-    m_tcp.m_offload_flags =m_ctx->m_offload_flags;
+    CFlowBase::init();
+
+    /* back pointer */
+    m_tcp.m_flow=this;
+    if (m_template.is_tcp_tso()){
+        /* to cache the info*/
+        m_tcp.m_tuneable_flags |=TUNE_TSO_CACHE;
+    }
 
     if (m_tcp.is_tso()){
         if (m_tcp.t_maxseg >m_tcp.m_max_tso ){
@@ -265,32 +252,49 @@ void CTcpFlow::init(){
         m_tcp.m_max_tso=m_tcp.t_maxseg;
     }
 
-    tcp_template(&m_tcp,m_ctx);
-
     /* default keepalive */
     m_tcp.m_socket.so_options = US_SO_KEEPALIVE;
 
     /* register the timer */
-
     m_ctx->timer_w_start(this);
 }
 
-void CTcpFlow::Create(CTcpPerThreadCtx *ctx){
-    m_tick=0;
-
-    /* TCP_OPTIM  */
-    tcpcb *tp=&m_tcp;
-    memset((char *) tp, 0,sizeof(struct tcpcb));
-
+void CFlowBase::Create(CTcpPerThreadCtx *ctx){
     m_pad[0]=0;
     m_pad[1]=0;
     m_c_idx_enable =0;
     m_c_idx=0;
     m_c_pool_idx=0;
     m_c_template_idx=0;
-
     m_ctx=ctx;
+}
+
+void CFlowBase::Delete(){
+
+}
+
+void CFlowBase::init(){
+        /* build template */
+    m_template.set_offload_mask(m_ctx->m_offload_flags);
+    m_template.build_template(m_ctx);
+}
+
+void CFlowBase::learn_ipv6_headers_from_network(IPv6Header * net_ipv6){
+    m_template.learn_ipv6_headers_from_network(net_ipv6);
+}
+
+
+
+void CTcpFlow::Create(CTcpPerThreadCtx *ctx){ 
+    CFlowBase::Create(ctx);
+    m_tick=0;
     m_timer.reset();
+    m_timer.m_type = 0; 
+
+    /* TCP_OPTIM  */
+    tcpcb *tp=&m_tcp;
+    memset((char *) tp, 0,sizeof(struct tcpcb));
+    m_timer.m_type = ttTCP_FLOW; 
 
     tp->m_socket.so_snd.Create(ctx->tcp_tx_socket_bsize);
     tp->m_socket.so_rcv.sb_hiwat = ctx->tcp_rx_socket_bsize;
@@ -301,6 +305,7 @@ void CTcpFlow::Create(CTcpPerThreadCtx *ctx){
     tp->mbuf_socket = ctx->m_mbuf_socket;
 
     tp->t_flags = ctx->tcp_do_rfc1323 ? (TF_REQ_SCALE|TF_REQ_TSTMP) : 0;
+    tp->t_flags |= ctx->tcp_no_delay?(TF_NODELAY):0;
 
     /*
      * Init srtt to TCPTV_SRTTBASE (0), so we can tell that we have no
@@ -315,7 +320,6 @@ void CTcpFlow::Create(CTcpPerThreadCtx *ctx){
         TCPTV_MIN, TCPTV_REXMTMAX);
     tp->snd_cwnd = TCP_MAXWIN << TCP_MAX_WINSHIFT;
     tp->snd_ssthresh = TCP_MAXWIN << TCP_MAX_WINSHIFT;
-
 }
 
 void CTcpFlow::set_c_tcp_info(const CAstfPerTemplateRW *rw_db, uint16_t temp_id) {
@@ -338,12 +342,25 @@ void CTcpFlow::set_c_tcp_info(const CAstfPerTemplateRW *rw_db, uint16_t temp_id)
     if (tune->is_valid_field(CTcpTuneables::tcp_initwnd_bit) ) {
         m_tcp.m_tuneable_flags |= TUNE_INIT_WIN;
     }
+
+    if (tune->is_valid_field(CTcpTuneables::tcp_no_delay) ) {
+        m_tcp.m_tuneable_flags |= TUNE_NO_DELAY;
+    }
+
+    if (tune->is_valid_field(CTcpTuneables::tcp_rx_buf_size)) {
+        m_tcp.m_socket.so_rcv.sb_hiwat = tune->m_tcp_rxbufsize;
+    }
+
+    if (tune->is_valid_field(CTcpTuneables::tcp_tx_buf_size)) {
+        m_tcp.m_socket.so_snd.sb_hiwat = tune->m_tcp_txbufsize;
+    }
+
 }
 
 void CTcpFlow::set_s_tcp_info(const CAstfDbRO * ro_db, CTcpTuneables *tune) {
     m_tcp.m_tuneable_flags = 0;
 
-    if (! tune)
+    if (!tune)
         return;
 
     if (tune->is_empty())
@@ -360,13 +377,18 @@ void CTcpFlow::set_s_tcp_info(const CAstfDbRO * ro_db, CTcpTuneables *tune) {
     if (tune->is_valid_field(CTcpTuneables::tcp_initwnd_bit)) {
         m_tcp.m_tuneable_flags |= TUNE_INIT_WIN;
     }
-}
 
+    if (tune->is_valid_field(CTcpTuneables::tcp_no_delay) ) {
+        m_tcp.m_tuneable_flags |= TUNE_NO_DELAY;
+    }
 
-void CTcpFlow::server_update_mac_from_packet(uint8_t *pkt){
-    /* copy thr MAC from the packet in reverse order */
-    memcpy(m_tcp.template_pkt+6,pkt,6);
-    memcpy(m_tcp.template_pkt,pkt+6,6);
+    if (tune->is_valid_field(CTcpTuneables::tcp_rx_buf_size)) {
+        m_tcp.m_socket.so_rcv.sb_hiwat = tune->m_tcp_rxbufsize;
+    }
+
+    if (tune->is_valid_field(CTcpTuneables::tcp_tx_buf_size)) {
+        m_tcp.m_socket.so_snd.sb_hiwat = tune->m_tcp_txbufsize;
+    }
 }
 
 
@@ -390,15 +412,66 @@ void CTcpFlow::Delete(){
 #define my_unsafe_container_of(ptr, type, member)              \
     ((type *) ((uint8_t *)(ptr) - offsetof(type, member)))
 
+#define my_unsafe_container_app(ptr, type,func)              \
+    ((type *) ((uint8_t *)(ptr) - type::func()))
 
-static void tcp_timer(void *userdata,
+
+static void ctx_timer(void *userdata,
                        CHTimerObj *tmr){
     CTcpPerThreadCtx * tcp_ctx=(CTcpPerThreadCtx * )userdata;
-    UNSAFE_CONTAINER_OF_PUSH;
-    CTcpFlow * tcp_flow=my_unsafe_container_of(tmr,CTcpFlow,m_timer);
-    UNSAFE_CONTAINER_OF_POP;
-    tcp_flow->on_tick();
-    tcp_ctx->timer_w_restart(tcp_flow);
+    CEmulApp * app;
+    if (likely(tmr->m_type==ttTCP_FLOW)) {
+        /* most common */
+        {
+            CTcpFlow * tcp_flow;
+            UNSAFE_CONTAINER_OF_PUSH;
+            tcp_flow=my_unsafe_container_of(tmr,CTcpFlow,m_timer);
+            UNSAFE_CONTAINER_OF_POP;
+            tcp_flow->on_tick();
+            tcp_ctx->timer_w_restart(tcp_flow);
+        }
+        return;
+    }
+    switch (tmr->m_type) {
+    case ttTCP_APP:
+        UNSAFE_CONTAINER_OF_PUSH;
+        app=my_unsafe_container_app(tmr,CEmulApp,timer_offset);
+        UNSAFE_CONTAINER_OF_POP;
+        app->on_tick();
+        break;
+    case ttUDP_FLOW:
+        {
+        CUdpFlow * udp_flow;
+        UNSAFE_CONTAINER_OF_PUSH;
+        udp_flow=my_unsafe_container_of(tmr,CUdpFlow,m_keep_alive_timer);
+        UNSAFE_CONTAINER_OF_POP;
+        udp_flow->on_tick();
+        tcp_ctx->handle_udp_timer(udp_flow);
+        }
+        break;
+    case ttUDP_APP:
+        UNSAFE_CONTAINER_OF_PUSH;
+        app=my_unsafe_container_app(tmr,CEmulApp,timer_offset);
+        UNSAFE_CONTAINER_OF_POP;
+        app->on_tick();
+        tcp_ctx->handle_udp_timer(app->get_udp_flow());
+        break;
+    case ttGen:
+        {
+            CAstfTimerObj * tobj=(CAstfTimerObj *)tmr;
+            tobj->m_cb(userdata,tobj->m_userdata1,tobj);
+        }
+        break;
+    case ttGenFunctor:
+        {
+            CAstfTimerFunctorObj * tobj=(CAstfTimerFunctorObj *)tmr;
+            tobj->m_cb(tobj);
+        }
+        break;
+
+    default:
+        assert(0);
+    };
 }
 
 /*  this function is called every 20usec to see if we have an issue with resource */
@@ -426,10 +499,12 @@ bool CTcpPerThreadCtx::is_open_flow_enabled(){
 /* tick every 50msec TCP_TIMER_W_TICK */
 void CTcpPerThreadCtx::timer_w_on_tick(){
 #ifndef TREX_SIM
+    /* we have two levels on non-sim */
     uint32_t left;
-    m_timer_w.on_tick_level_count(0,(void*)this,tcp_timer,16,left);
+    m_timer_w.on_tick_level0((void*)this,ctx_timer);
+    m_timer_w.on_tick_level_count(1,(void*)this,ctx_timer,16,left);
 #else
-    m_timer_w.on_tick_level0((void*)this,tcp_timer);
+    m_timer_w.on_tick_level0((void*)this,ctx_timer);
 #endif
 
     if ( m_tick==TCP_SLOW_RATIO_MASTER ) {
@@ -490,6 +565,10 @@ void CTcpPerThreadCtx::update_tuneables(CTcpTuneables *tune) {
         tcp_do_rfc1323 = (int)tune->m_tcp_do_rfc1323;
     }
 
+    if (tune->is_valid_field(CTcpTuneables::tcp_no_delay)) {
+        tcp_no_delay = (int)tune->m_tcp_no_delay;
+    }
+
     if (tune->is_valid_field(CTcpTuneables::tcp_keepinit)) {
         tcp_keepinit = (int)tune->m_tcp_keepinit;
     }
@@ -504,7 +583,7 @@ void CTcpPerThreadCtx::update_tuneables(CTcpTuneables *tune) {
 
     #ifndef TREX_SIM
     if (tune->is_valid_field(CTcpTuneables::tcp_delay_ack)) {
-        tcp_fast_tick_msec =  tune->m_tcp_delay_ack_msec;
+        tcp_fast_tick_msec =  tw_time_msec_to_ticks(tune->m_tcp_delay_ack_msec);
         tcp_slow_fast_ratio = _update_slow_fast_ratio(tcp_fast_tick_msec);
     }
     #endif
@@ -512,7 +591,14 @@ void CTcpPerThreadCtx::update_tuneables(CTcpTuneables *tune) {
 
 bool CTcpPerThreadCtx::Create(uint32_t size,
                               bool is_client){
-
+    uint32_t seed;
+    #ifdef TREX_SIM
+    seed=0x1234;
+    #else
+    seed=rand();
+    #endif
+    m_sch_rampup = 0;
+    m_rand = new KxuLCRand(seed);
     tcp_tx_socket_bsize=32*1024;
     tcp_rx_socket_bsize=32*1024 ;
     sb_max = SB_MAX;        /* patchable, not used  */
@@ -525,6 +611,7 @@ bool CTcpPerThreadCtx::Create(uint32_t size,
     tcp_max_tso = TCP_TSO_MAX_DEFAULT;
     tcp_rttdflt = TCPTV_SRTTDFLT / PR_SLOWHZ;
     tcp_do_rfc1323 = 1;
+    tcp_no_delay = 0;
     tcp_keepinit = TCPTV_KEEP_INIT;
     tcp_keepidle = TCPTV_KEEP_IDLE;
     tcp_keepintvl = TCPTV_KEEPINTVL;
@@ -538,15 +625,17 @@ bool CTcpPerThreadCtx::Create(uint32_t size,
     m_pad=0;
     tcp_iss = rand();   /* wrong, but better than a constant */
     m_tcpstat.Clear();
+    m_udpstat.Clear();
     m_tick=0;
     tcp_now=0;
+    m_fif_d_time=0.0;
     m_cb = NULL;
     m_template_rw = NULL;
     m_template_ro = NULL;
     memset(&tcp_saveti,0,sizeof(tcp_saveti));
 
     RC_HTW_t tw_res;
-    tw_res = m_timer_w.Create(1024,1);
+    tw_res = m_timer_w.Create(1024,TCP_TIMER_LEVEL1_DIV);
 
     if (tw_res != RC_HTW_OK ){
         CHTimerWheelErrorStr err(tw_res);
@@ -554,9 +643,10 @@ bool CTcpPerThreadCtx::Create(uint32_t size,
         printf("ERROR  %-30s  - %s \n",err.get_str(),err.get_help_str());
         return(false);
     }
-#ifndef TREX_SIM
-    m_timer_w.set_level1_cnt_div(TCP_TIMER_W_DIV);
-#endif
+    if (TCP_TIMER_LEVEL1_DIV>1){
+        /* on non-simulation we have two level active*/
+        m_timer_w.set_level1_cnt_div();
+    }
 
     if (!m_ft.Create(size,is_client)){
         printf("ERROR  can't create flow table \n");
@@ -566,8 +656,37 @@ bool CTcpPerThreadCtx::Create(uint32_t size,
 }
 
 
+void CTcpPerThreadCtx::init_sch_rampup(){
+        /* calc default fif rate*/
+        astf_thread_id_t max_threads=m_template_rw->get_max_threads();
+        m_fif_d_time = m_template_ro->get_delta_tick_sec_thread(max_threads);
+
+        /* get client tunables */
+        CTcpTuneables * ctx_tune = get_template_rw()->get_c_tuneables();
+
+        if ( ctx_tune->is_valid_field(CTcpTuneables::sched_rampup) ){
+            m_sch_rampup = new CAstfFifRampup(this,
+                                              ctx_tune->m_scheduler_rampup,
+                                              m_template_ro->get_total_cps_per_thread(max_threads));
+        }
+}
+
+
+
+void CTcpPerThreadCtx::call_startup(){
+    if ( is_client_side() ){
+        init_sch_rampup();
+    }
+}
 
 void CTcpPerThreadCtx::Delete(){
+    assert(m_rand);
+    if (m_sch_rampup){
+        delete  m_sch_rampup;
+        m_sch_rampup=0;
+    }
+    delete m_rand;
+    m_rand=0;
     m_timer_w.Delete();
     m_ft.Delete();
 }
@@ -604,17 +723,35 @@ static void tcp_template_ipv6_update(IPv6Header *ipv6,
 
 
 
+void CFlowTemplate::learn_ipv6_headers_from_network(IPv6Header * net_ipv6){
+
+    assert(m_is_ipv6==1);
+    uint8_t * p=m_template_pkt;
+    IPv6Header *ipv6=(IPv6Header *)(p+m_offset_ip);
+    ipv6->setSourceIpv6Raw((uint8_t*)&net_ipv6->myDestination[0]);
+    ipv6->setDestIpv6Raw((uint8_t*)&net_ipv6->mySource[0]);
+
+    /* recalculate */
+    if (m_offload_flags & OFFLOAD_TX_CHKSUM){
+        if (is_tcp()) {
+            m_l4_pseudo_checksum = rte_ipv6_phdr_cksum((struct ipv6_hdr *)ipv6,(PKT_TX_IPV6 | PKT_TX_TCP_CKSUM));
+        }else{
+            m_l4_pseudo_checksum = rte_ipv6_phdr_cksum((struct ipv6_hdr *)ipv6,(PKT_TX_IPV6 | PKT_TX_UDP_CKSUM));
+        }
+    }else{
+        m_l4_pseudo_checksum=0;
+    }
+
+}
 
 
-/*
- * Create template to be used to send tcp packets on a connection.
- * Call after host entry created, allocates an mbuf and fills
- * in a skeletal tcp/ip header, minimizing the amount of work
- * necessary when the connection is used.
- */
-void tcp_template(struct tcpcb *tp,
-                  CTcpPerThreadCtx * ctx){
-    /* TCPIPV6*/
+void CFlowTemplate::server_update_mac_from_packet(uint8_t *pkt){
+    /* copy thr MAC from the packet in reverse order */
+    memcpy(m_template_pkt+6,pkt,6);
+    memcpy(m_template_pkt,pkt+6,6);
+}
+
+void CFlowTemplate::build_template_ip(CTcpPerThreadCtx * ctx){
 
     const uint8_t default_ipv4_header[] = {
         0x00,0x00,0x00,0x01,0x0,0x0,  // Ethr
@@ -624,15 +761,9 @@ void tcp_template(struct tcpcb *tp,
 
         0x45,0x00,0x00,0x00,          //Ipv4
         0x00,0x00,0x40,0x00,
-        0x7f,0x06,0x00,0x00,
+        0x7f,0x11,0x00,0x00,
         0x00,0x00,0x00,0x00,
-        0x00,0x00,0x00,0x00,
-
-        0x00, 0x00, 0x00, 0x00, // src, dst ports  //TCP
-        0x00, 0x00, 0x00, 0x00, 
-        0x00, 0x00, 0x00, 0x00, // seq num, ack num
-        0x50, 0x00, 0x00, 0x00, // Header size, flags, window size
-        0x00, 0x00, 0x00, 0x00 // checksum ,urgent pointer
+        0x00,0x00,0x00,0x00
     };
 
 
@@ -643,7 +774,7 @@ void tcp_template(struct tcpcb *tp,
 
 
         0x60,0x00,0x00,0x00,          //Ipv6
-        0x00,0x00,0x06,0x40,
+        0x00,0x00,0x11,0x40,
 
         0x00,0x00,0x00,0x00,
         0x00,0x00,0x00,0x00,
@@ -654,26 +785,17 @@ void tcp_template(struct tcpcb *tp,
         0x00,0x00,0x00,0x00,
         0x00,0x00,0x00,0x00,
         0x00,0x00,0x00,0x00, // dst IP
-
-        0x00, 0x00, 0x00, 0x00, // src, dst ports  //TCP
-        0x00, 0x00, 0x00, 0x00, 
-        0x00, 0x00, 0x00, 0x00, // seq num, ack num
-        0x50, 0x00, 0x00, 0x00, // Header size, flags, window size
-        0x00, 0x00, 0x00, 0x00 // checksum ,urgent pointer
     };
 
-
-    if (!tp->is_ipv6) {
+    if (!m_is_ipv6) {
         uint8_t vlan_offset=0;
-        if (tp->vlan){
+        if (m_vlan){
             vlan_offset=4;
         }
+        m_offset_ip  = 14+vlan_offset;
+        m_offset_l4 = m_offset_ip + 20;
 
-        tp->offset_ip  = 14+vlan_offset;
-        tp->offset_tcp = tp->offset_ip + 20;
-        tp->is_ipv6    = 0;
-
-        uint8_t *p=tp->template_pkt;
+        uint8_t *p=m_template_pkt;
         if (vlan_offset==0){
             memcpy(p,default_ipv4_header,sizeof(default_ipv4_header) );
         }else{
@@ -681,37 +803,28 @@ void tcp_template(struct tcpcb *tp,
             const uint8_t next_vlan[2]={0x81,00};
             memcpy(p+12,next_vlan,2);
             VLANHeader vlan_head;
-            vlan_head.setVlanTag(tp->vlan);
+            vlan_head.setVlanTag(m_vlan);
             vlan_head.setNextProtocolFromHostOrder(0x0800);
             memcpy(p+14,vlan_head.getPointer(),4);
             memcpy(p+18,default_ipv4_header+14,sizeof(default_ipv4_header)-14);
         }
         /* set default value */
-        IPHeader *lpIpv4=(IPHeader *)(p+tp->offset_ip);
+        IPHeader *lpIpv4=(IPHeader *)(p+m_offset_ip);
         lpIpv4->setTotalLength(20); /* important for PH calculation */
-        lpIpv4->setDestIp(tp->dst_ipv4);
-        lpIpv4->setSourceIp(tp->src_ipv4);
+        lpIpv4->setDestIp(m_dst_ipv4);
+        lpIpv4->setSourceIp(m_src_ipv4);
+        lpIpv4->setProtocol(m_proto);
         lpIpv4->ClearCheckSum();
-        TCPHeader *lpTCP=(TCPHeader *)(p+tp->offset_tcp);
-        lpTCP->setSourcePort(tp->src_port);
-        lpTCP->setDestPort(tp->dst_port);
-
-        if (tp->m_offload_flags & TCP_OFFLOAD_TX_CHKSUM){
-            tp->l4_pseudo_checksum = rte_ipv4_phdr_cksum((struct ipv4_hdr *)lpIpv4,(PKT_TX_IPV4 |PKT_TX_IP_CKSUM|PKT_TX_TCP_CKSUM));
-        }else{
-            tp->l4_pseudo_checksum=0;
-        }
     }else{
         uint8_t vlan_offset=0;
-        if (tp->vlan){
+        if (m_vlan){
             vlan_offset=4;
         }
 
-        tp->offset_ip  = 14+vlan_offset;
-        tp->offset_tcp = tp->offset_ip + IPV6_HDR_LEN;
-        tp->is_ipv6    = 1;
+        m_offset_ip  = 14+vlan_offset;
+        m_offset_l4 = m_offset_ip + IPV6_HDR_LEN;
 
-        uint8_t *p=tp->template_pkt;
+        uint8_t *p=m_template_pkt;
         if (vlan_offset==0){
             memcpy(p,default_ipv6_header,sizeof(default_ipv6_header) );
         }else{
@@ -719,26 +832,80 @@ void tcp_template(struct tcpcb *tp,
             const uint8_t next_vlan[2]={0x81,00};
             memcpy(p+12,next_vlan,2);
             VLANHeader vlan_head;
-            vlan_head.setVlanTag(tp->vlan);
+            vlan_head.setVlanTag(m_vlan);
             vlan_head.setNextProtocolFromHostOrder(0x86dd);
             memcpy(p+14,vlan_head.getPointer(),4);
             memcpy(p+18,default_ipv6_header+14,sizeof(default_ipv6_header)-14);
         }
         /* set default value */
-        IPv6Header *ipv6=(IPv6Header *)(p+tp->offset_ip);
+        IPv6Header *ipv6=(IPv6Header *)(p+m_offset_ip);
         tcp_template_ipv6_update(ipv6,ctx);
-        ipv6->updateLSBIpv6Dst(tp->dst_ipv4);
-        ipv6->updateLSBIpv6Src(tp->src_ipv4);
+        ipv6->updateLSBIpv6Dst(m_dst_ipv4);
+        ipv6->updateLSBIpv6Src(m_src_ipv4);
+        ipv6->setNextHdr(m_proto);
         ipv6->setPayloadLen(0);  /* important for PH calculation */
-        TCPHeader *lpTCP=(TCPHeader *)(p+tp->offset_tcp);
-        lpTCP->setSourcePort(tp->src_port);
-        lpTCP->setDestPort(tp->dst_port);
+    }
+}
 
-        if (tp->m_offload_flags & TCP_OFFLOAD_TX_CHKSUM){
-            tp->l4_pseudo_checksum = rte_ipv6_phdr_cksum((struct ipv6_hdr *)ipv6,(PKT_TX_IPV6 | PKT_TX_TCP_CKSUM));
+
+void CFlowTemplate::build_template_tcp(CTcpPerThreadCtx * ctx){
+       const uint8_t tcp_header[] = {
+         0x00, 0x00, 0x00, 0x00, // src, dst ports  //TCP
+         0x00, 0x00, 0x00, 0x00, 
+         0x00, 0x00, 0x00, 0x00, // seq num, ack num
+         0x50, 0x00, 0x00, 0x00, // Header size, flags, window size
+         0x00, 0x00, 0x00, 0x00 // checksum ,urgent pointer
+       };
+
+       uint8_t *p=m_template_pkt;
+       TCPHeader *lpTCP=(TCPHeader *)(p+m_offset_l4);
+       memcpy(lpTCP,tcp_header,sizeof(tcp_header));
+
+       lpTCP->setSourcePort(m_src_port);
+       lpTCP->setDestPort(m_dst_port);
+       if (m_offload_flags & OFFLOAD_TX_CHKSUM){
+           if (m_is_ipv6) {
+               m_l4_pseudo_checksum = rte_ipv6_phdr_cksum((struct ipv6_hdr *)(p+m_offset_ip),(PKT_TX_IPV6 | PKT_TX_TCP_CKSUM));
+           }else{
+               m_l4_pseudo_checksum = rte_ipv4_phdr_cksum((struct ipv4_hdr *)(p+m_offset_ip),(PKT_TX_IPV4 |PKT_TX_IP_CKSUM|PKT_TX_TCP_CKSUM));
+           }
+       }else{
+            m_l4_pseudo_checksum=0;
+       }
+}
+
+
+void CFlowTemplate::build_template_udp(CTcpPerThreadCtx * ctx){
+
+    const uint8_t udp_header[] = {
+        0x00, 0x00, 0x00, 0x00, // src, dst ports  //UDP
+        0x00, 0x00, 0x00, 0x00, 
+    };
+
+    uint8_t *p=m_template_pkt;
+    UDPHeader *lpUDP=(UDPHeader *)(p+m_offset_l4);
+    memcpy(lpUDP,udp_header,sizeof(udp_header));
+    lpUDP->setSourcePort(m_src_port);
+    lpUDP->setDestPort(m_dst_port);
+    if (m_offload_flags & OFFLOAD_TX_CHKSUM){
+        if (m_is_ipv6) {
+            m_l4_pseudo_checksum = rte_ipv6_phdr_cksum((struct ipv6_hdr *)(p+m_offset_ip),(PKT_TX_IPV6 | PKT_TX_UDP_CKSUM));
         }else{
-            tp->l4_pseudo_checksum=0;
+            m_l4_pseudo_checksum = rte_ipv4_phdr_cksum((struct ipv4_hdr *)(p+m_offset_ip),(PKT_TX_IPV4 |PKT_TX_IP_CKSUM|PKT_TX_UDP_CKSUM));
         }
+    }else{
+        m_l4_pseudo_checksum=0;
+    }
+}
+
+
+void CFlowTemplate::build_template(CTcpPerThreadCtx * ctx){
+
+    build_template_ip(ctx);
+    if (is_tcp()) {
+        build_template_tcp(ctx);
+    }else{
+        build_template_udp(ctx);
     }
 }
 

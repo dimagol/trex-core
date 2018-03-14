@@ -50,7 +50,7 @@ public:
              rte_mbuf_t *m);
 
    int on_flow_close(CTcpPerThreadCtx *ctx,
-                     CTcpFlow * flow);
+                     CFlowBase * flow);
 
    int on_redirect_rx(CTcpPerThreadCtx *ctx,
                       rte_mbuf_t *m);
@@ -63,7 +63,7 @@ public:
 
 
 int CTcpIOCb::on_flow_close(CTcpPerThreadCtx *ctx,
-                              CTcpFlow * flow){
+                            CFlowBase * flow){
     uint32_t   c_idx;
     uint16_t   c_pool_idx;
     uint16_t   c_template_id;
@@ -74,6 +74,7 @@ int CTcpIOCb::on_flow_close(CTcpPerThreadCtx *ctx,
         /* nothing to do, flow ports was allocated by client */
         return(0);
     }
+
     m_p->m_stats.m_total_close_flows +=1;
 
     flow->get_tuple_generator(c_idx,c_pool_idx,c_template_id,enable);
@@ -83,7 +84,7 @@ int CTcpIOCb::on_flow_close(CTcpPerThreadCtx *ctx,
     CTupleGeneratorSmart * lpgen= cur->m_tuple_gen.get_gen();
 
     if ( lpgen->IsFreePortRequired(c_pool_idx) ){
-        lpgen->FreePort(c_pool_idx,c_idx,flow->m_tcp.src_port);
+        lpgen->FreePort(c_pool_idx,c_idx,flow->m_template.m_src_port);
     }
     return(0);
 }
@@ -120,25 +121,30 @@ int CTcpIOCb::on_tx(CTcpPerThreadCtx *ctx,
 }
 
 
-void CFlowGenListPerThread::tcp_handle_rx_flush(CGenNode * node,
+void CFlowGenListPerThread::handle_rx_flush(CGenNode * node,
                                                 bool on_terminate){
 
 #ifdef TREX_SIM
     m_cur_time_sec =node->m_time;
     m_node_gen.m_v_if->set_rx_burst_time(m_cur_time_sec);
 #endif
-
+    double dtime=m_sched_accurate?TCP_RX_FLUSH_ACCURATE_SEC:TCP_RX_FLUSH_SEC;
+    int drop=0;
     m_node_gen.m_p_queue.pop();
-    if ( on_terminate == false ){
-        node->m_time += TCP_RX_FLUSH_SEC;
-        m_node_gen.m_p_queue.push(node);
-    }else{
+    if ( on_terminate ){
         if (m_tcp_terminate){
-            free_node(node);
-        }else{
-            node->m_time += TCP_RX_FLUSH_SEC;
-            m_node_gen.m_p_queue.push(node);
+            if (m_tcp_terminate_cnt>(uint32_t)(2.0/dtime)) {
+                drop=1;
+            }else{
+                m_tcp_terminate_cnt++;
+            }
         }
+    }
+    if (drop) {
+        free_node(node);
+    }else{
+        node->m_time += dtime;
+        m_node_gen.m_p_queue.push(node);
     }
 
     CVirtualIF * v_if=m_node_gen.m_v_if;
@@ -178,15 +184,19 @@ void CFlowGenListPerThread::tcp_handle_rx_flush(CGenNode * node,
                 break;
             }
         }
+      if (m_sched_accurate && sum){
+          v_if->flush_tx_queue();
+      }
     }
 }
 
-static CTcpAppApiImpl     m_tcp_bh_api_impl_c;
+static CEmulAppApiImpl     m_tcp_bh_api_impl_c;
+static CEmulAppApiUdpImpl  m_udp_bh_api_impl_c;
 
 #ifndef TREX_SIM
 uint16_t get_client_side_vlan(CVirtualIF * _ifs);
 #endif
-void CFlowGenListPerThread::tcp_generate_flow(bool &done){
+void CFlowGenListPerThread::generate_flow(bool &done){
 
     done=false;
 
@@ -198,6 +208,10 @@ void CFlowGenListPerThread::tcp_generate_flow(bool &done){
     CAstfPerTemplateRW * cur = c_rw->get_template_by_id(template_id);
     CAstfDbRO    *   cur_tmp_ro = m_c_tcp->m_template_ro;
 
+    if (cur->check_limit()){
+        /* we can't generate a flow, there is a limit*/
+        return;
+    }
 
     CTupleBase  tuple;
     cur->m_tuple_gen.GenerateTuple(tuple);
@@ -224,14 +238,28 @@ void CFlowGenListPerThread::tcp_generate_flow(bool &done){
 
     bool is_ipv6 = CGlobalInfo::is_ipv6_enable() || c_rw->get_c_tuneables()->is_valid_field(CTcpTuneables::ipv6_enable);
 
-    CTcpFlow * c_flow = m_c_tcp->m_ft.alloc_flow(m_c_tcp,
-                                                 tuple.getClient(),
-                                                 tuple.getServer(),
-                                                 tuple.getClientPort(),
-                                                 tuple.getServerPort(),
-                                                 vlan,
-                                                 is_ipv6);
-    if (c_flow == (CTcpFlow *)0) {
+    bool is_udp=cur->is_udp();
+
+    CFlowBase * c_flow;
+    if (is_udp) {
+        c_flow = m_c_tcp->m_ft.alloc_flow_udp(m_c_tcp,
+                                                     tuple.getClient(),
+                                                     tuple.getServer(),
+                                                     tuple.getClientPort(),
+                                                     tuple.getServerPort(),
+                                                     vlan,
+                                                     is_ipv6,
+                                                     true);
+    }else{
+        c_flow = m_c_tcp->m_ft.alloc_flow(m_c_tcp,
+                                                     tuple.getClient(),
+                                                     tuple.getServer(),
+                                                     tuple.getClientPort(),
+                                                     tuple.getServerPort(),
+                                                     vlan,
+                                                     is_ipv6);
+    }
+    if (c_flow == (CFlowBase *)0) {
         return;
     }
 
@@ -242,11 +270,11 @@ void CFlowGenListPerThread::tcp_generate_flow(bool &done){
                                 true);
 
     /* update default mac addrees, dir is zero client side  */
-    m_node_gen.m_v_if->update_mac_addr_from_global_cfg(CLIENT_SIDE,c_flow->m_tcp.template_pkt);
+    m_node_gen.m_v_if->update_mac_addr_from_global_cfg(CLIENT_SIDE,c_flow->m_template.m_template_pkt);
     /* override by client config, if exists */
     if (lpc) {
         ClientCfgDirBase *b=&lpc->m_initiator;
-        char * p =(char *)c_flow->m_tcp.template_pkt;
+        char * p =(char *)c_flow->m_template.m_template_pkt;
         if (b->has_src_mac_addr()){
             memcpy(p+6,b->get_src_mac_addr(),6);
         }
@@ -258,8 +286,14 @@ void CFlowGenListPerThread::tcp_generate_flow(bool &done){
     CFlowKeyTuple   c_tuple;
     c_tuple.set_ip(tuple.getClient());
     c_tuple.set_port(tuple.getClientPort());
-    c_tuple.set_proto(6);
+    if (is_udp){
+        c_tuple.set_proto(IPHeader::Protocol::UDP);
+    }else{
+        c_tuple.set_proto(IPHeader::Protocol::TCP);
+    }
     c_tuple.set_ipv4(is_ipv6?false:true);
+
+    m_stats.m_total_open_flows += 1;
 
     if (!m_c_tcp->m_ft.insert_new_flow(c_flow,c_tuple)){
         /* need to free the tuple */
@@ -267,24 +301,46 @@ void CFlowGenListPerThread::tcp_generate_flow(bool &done){
         return;
     }
 
-    CTcpApp * app_c;
+    CEmulApp * app_c;
 
     app_c = &c_flow->m_app;
 
-    app_c->set_program(cur_tmp_ro->get_client_prog(template_id));
-    app_c->set_bh_api(&m_tcp_bh_api_impl_c);
-    app_c->set_flow_ctx(m_c_tcp,c_flow);
-    c_flow->set_app(app_c);
-    c_flow->set_c_tcp_info(cur, template_id);
+    if (is_udp){
+        CUdpFlow * udp_flow=(CUdpFlow*)c_flow;;
+        app_c->set_program(cur_tmp_ro->get_client_prog(template_id));
+        app_c->set_bh_api(&m_udp_bh_api_impl_c);
+        app_c->set_udp_flow_ctx(m_c_tcp,udp_flow);
+        app_c->set_udp_flow();
+        if (CGlobalInfo::m_options.preview.getEmulDebug() ){
+            app_c->set_log_enable(true);
+        }
+        /* start connect */
+        app_c->start(false);
+        /* in UDP there are case that we need to open and close the flow in the first packet */
+        if (udp_flow->is_can_closed()) {
+            m_c_tcp->m_ft.handle_close(m_c_tcp,c_flow,true);
+        }
 
-    /* start connect */
-    app_c->start(true);
-    tcp_connect(m_c_tcp,&c_flow->m_tcp);
+    }else{
+        CTcpFlow * tcp_flow=(CTcpFlow*)c_flow;
+        app_c->set_program(cur_tmp_ro->get_client_prog(template_id));
+        app_c->set_bh_api(&m_tcp_bh_api_impl_c);
+        app_c->set_flow_ctx(m_c_tcp,tcp_flow);
+        if (CGlobalInfo::m_options.preview.getEmulDebug() ){
+            app_c->set_log_enable(true);
+        }
 
-    m_stats.m_total_open_flows += 1;
+        tcp_flow->set_app(app_c);
+        tcp_flow->set_c_tcp_info(cur, template_id);
+
+        /* start connect */
+        app_c->start(true);
+        tcp_connect(m_c_tcp,&tcp_flow->m_tcp);
+    }
+    /* WARNING -- flow might be not valid here !!!! */
 }
 
-void CFlowGenListPerThread::tcp_handle_tx_fif(CGenNode * node,
+void CFlowGenListPerThread::handle_tx_fif(CGenNode * node,
                                               bool on_terminate){
     #ifdef TREX_SIM
     m_cur_time_sec =node->m_time;
@@ -295,10 +351,15 @@ void CFlowGenListPerThread::tcp_handle_tx_fif(CGenNode * node,
     if ( on_terminate == false ) {
         m_cur_time_sec = node->m_time ;
 
-        tcp_generate_flow(done);
+        generate_flow(done);
+
+        if (m_sched_accurate){
+            CVirtualIF * v_if=m_node_gen.m_v_if;
+            v_if->flush_tx_queue();
+        }
 
         if (!done) {
-            node->m_time += m_tcp_fif_d_time;
+            node->m_time += m_c_tcp->m_fif_d_time;
             m_node_gen.m_p_queue.push(node);
         }else{
             free_node(node);
@@ -308,7 +369,7 @@ void CFlowGenListPerThread::tcp_handle_tx_fif(CGenNode * node,
     }
 }
 
-void CFlowGenListPerThread::tcp_handle_tw(CGenNode * node,
+void CFlowGenListPerThread::handle_tw(CGenNode * node,
                                           bool on_terminate){
     #ifdef TREX_SIM
     m_cur_time_sec = node->m_time;
@@ -363,8 +424,6 @@ bool CFlowGenListPerThread::Create_tcp(){
     CTcpIOCb * c_tcp_io = new CTcpIOCb();
     CTcpIOCb * s_tcp_io = new CTcpIOCb();
 
-    m_tcp_fif_d_time = template_db->get_delta_tick_sec_thread(m_max_threads);
-
     c_tcp_io->m_dir =0;
     c_tcp_io->m_p   = this;
     s_tcp_io->m_dir =1;
@@ -396,12 +455,18 @@ bool CFlowGenListPerThread::Create_tcp(){
     m_c_tcp->set_memory_socket(mem_socket_id);
     m_s_tcp->set_memory_socket(mem_socket_id);
 
+
+    if ( (rw->get_c_tuneables()->is_valid_field(CTcpTuneables::sched_accurate)) ||
+         (rw->get_s_tuneables()->is_valid_field(CTcpTuneables::sched_accurate)) ){
+        m_sched_accurate=true;
+    }
+
     /* set dev flags */
     CPreviewMode * lp=&CGlobalInfo::m_options.preview;
 
     uint8_t dev_offload_flags=0;
     if (lp->getChecksumOffloadEnable()) {
-        dev_offload_flags |= (TCP_OFFLOAD_RX_CHKSUM | TCP_OFFLOAD_TX_CHKSUM);
+        dev_offload_flags |= (OFFLOAD_RX_CHKSUM | OFFLOAD_TX_CHKSUM);
     }
     if (lp->get_dev_tso_support()) {
         dev_offload_flags |= TCP_OFFLOAD_TSO;
@@ -410,13 +475,18 @@ bool CFlowGenListPerThread::Create_tcp(){
     m_c_tcp->set_offload_dev_flags(dev_offload_flags);
     m_s_tcp->set_offload_dev_flags(dev_offload_flags);
 
-
-    if ( m_preview_mode.getVMode() >2 ){
+    uint8_t dmode= m_preview_mode.getVMode();
+    if ( (dmode > 2) && (dmode < 7) ){
         m_c_tcp->m_ft.set_debug(true);
         m_s_tcp->m_ft.set_debug(true);
     }
 
     m_s_tcp->m_ft.set_tcp_api(&m_tcp_bh_api_impl_c);
+    m_s_tcp->m_ft.set_udp_api(&m_udp_bh_api_impl_c);
+
+    /* call startup for client side */
+    m_c_tcp->call_startup();
+    m_s_tcp->call_startup();
 
     return(true);
 }

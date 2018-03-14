@@ -18,6 +18,7 @@ from distutils.util import strtobool
 import subprocess
 import platform
 import stat
+import time
 
 # exit code is Important should be
 # -1 : don't continue
@@ -35,7 +36,7 @@ for path in ['/usr/local/sbin', '/usr/sbin', '/sbin']:
 os.environ['PATH'] = ':'.join(PATH_ARR)
 
 def if_list_remove_sub_if(if_list):
-    return list(map(lambda x:x.split('/')[0],if_list))
+    return if_list
 
 class ConfigCreator(object):
     mandatory_interface_fields = ['Slot_str', 'Device_str', 'NUMA']
@@ -383,7 +384,7 @@ Other network devices
         out=out.decode(errors='replace');
         return (out.strip());
 
-    def tune_mlx5_device (self,pci_id):
+    def tune_mlx_device (self,pci_id):
         # set PCIe Read to 4K and not 512 ... need to add it to startup s
         val=self.read_pci (pci_id,68)
         if val[0]=='0':
@@ -394,7 +395,7 @@ Other network devices
             self.write_pci (pci_id,68,val)
             assert(self.read_pci (pci_id,68)==val);
 
-    def get_mtu_mlx5 (self,dev_id):
+    def get_mtu_mlx (self,dev_id):
         if len(dev_id)>0:
             try:
               out=subprocess.check_output(['ifconfig', dev_id])
@@ -412,23 +413,23 @@ Other network devices
                 else:
                     return -1
 
-    def set_mtu_mlx5 (self,dev_id,new_mtu):
+    def set_mtu_mlx (self,dev_id,new_mtu):
         if len(dev_id)>0:
             out=subprocess.check_output(['ifconfig', dev_id,'mtu',str(new_mtu)])
             out=out.decode(errors='replace');
 
 
-    def set_max_mtu_mlx5_device(self,dev_id):
+    def set_max_mtu_mlx_device(self,dev_id):
         mtu=9*1024+22
-        dev_mtu=self.get_mtu_mlx5 (dev_id);
+        dev_mtu=self.get_mtu_mlx (dev_id);
         if (dev_mtu>0) and (dev_mtu!=mtu):
-            self.set_mtu_mlx5(dev_id,mtu);
-            if self.get_mtu_mlx5(dev_id) != mtu:
+            self.set_mtu_mlx(dev_id,mtu);
+            if self.get_mtu_mlx(dev_id) != mtu:
                 print("Could not set MTU to %d" % mtu)
                 sys.exit(-1);
 
 
-    def disable_flow_control_mlx5_device (self,dev_id):
+    def disable_flow_control_mlx_device (self,dev_id):
 
            if len(dev_id)>0:
                my_stderr = open("/dev/null","wb")
@@ -510,8 +511,16 @@ Other network devices
             raise DpdkSetup("Configuration file %s should include interfaces field with maximum 16 elements, got: %s." % (fcfg,l))
         if l % 2:
             raise DpdkSetup("Configuration file %s should include even number of interfaces, got: %s" % (fcfg,l))
-        if 'port_limit' in cfg_dict and cfg_dict['port_limit'] > len(if_list):
-            raise DpdkSetup('Error: port_limit should not be higher than number of interfaces in config file: %s\n' % fcfg)
+        if 'port_limit' in cfg_dict:
+            if cfg_dict['port_limit'] > len(if_list):
+                raise DpdkSetup('Error: port_limit should not be higher than number of interfaces in config file: %s\n' % fcfg)
+            if cfg_dict['port_limit'] % 2:
+                raise DpdkSetup('Error: port_limit in config file must be even number, got: %s\n' % cfg_dict['port_limit'])
+            if cfg_dict['port_limit'] <= 0:
+                raise DpdkSetup('Error: port_limit in config file must be positive number, got: %s\n' % cfg_dict['port_limit'])
+        if map_driver.parent_args and map_driver.parent_args.limit_ports is not None:
+            if map_driver.parent_args.limit_ports > len(if_list):
+                raise DpdkSetup('Error: --limit-ports CLI argument (%s) must not be higher than number of interfaces (%s) in config file: %s\n' % (map_driver.parent_args.limit_ports, len(if_list), fcfg))
 
 
     def do_bind_all(self, drv, pci, force = False):
@@ -587,11 +596,112 @@ Other network devices
 
             msg="converting astf profile {file} to json {out}".format(file = input_file, out=json_file)
             print(msg);
-            cmd = './astf-sim -f {file} --json > {json_file}'.format(file=input_file, json_file=json_file)
+            tunable='';
+            if map_driver.parent_args.tunable:
+                tunable="-t "+map_driver.parent_args.tunable+" "
+
+            cmd = './astf-sim -f {file} {tun} --json > {json_file}'.format(file=input_file, tun=tunable, json_file=json_file)
             print(cmd)
-            if os.system(cmd)!=0:
-                raise DpdkSetup('ERROR could not convert astf profile to JSON try to debug it using the command above.')
+            ret = os.system(cmd)
             os.chmod(json_file, stat.S_IRWXU | stat.S_IRWXG | stat.S_IRWXO)
+            if ret:
+                raise DpdkSetup('ERROR could not convert astf profile to JSON try to debug it using the command above.')
+
+
+    def config_hugepages(self, wanted_count = None):
+        huge_mnt_dir = '/mnt/huge'
+        if not os.path.isdir(huge_mnt_dir):
+            print("Creating huge node")
+            os.makedirs(huge_mnt_dir)
+
+        mount_output = subprocess.check_output('mount', stderr = subprocess.STDOUT).decode(errors='replace')
+        if 'hugetlbfs' not in mount_output:
+            os.system('mount -t hugetlbfs nodev %s' % huge_mnt_dir)
+
+        for socket_id in range(2):
+            filename = '/sys/devices/system/node/node%d/hugepages/hugepages-2048kB/nr_hugepages' % socket_id
+            if not os.path.isfile(filename):
+                if socket_id == 0:
+                    print('WARNING: hugepages config file (%s) does not exist!' % filename)
+                continue
+            if wanted_count is None:
+                if self.m_cfg_dict[0].get('low_end', False):
+                    if socket_id == 0:
+                        if map_driver.parent_args and map_driver.parent_args.limit_ports:
+                            if_count = map_driver.parent_args.limit_ports
+                        else:
+                            if_count = self.m_cfg_dict[0].get('port_limit', len(self.m_cfg_dict[0]['interfaces']))
+                        wanted_count = 20 + 40 * if_count
+                    else:
+                        wanted_count = 1 # otherwise, DPDK will not be able to see the device
+                else:
+                    wanted_count = 2048
+            with open(filename) as f:
+                configured_hugepages = int(f.read())
+            if configured_hugepages < wanted_count:
+                os.system('echo %d > %s' % (wanted_count, filename))
+                time.sleep(0.1)
+                with open(filename) as f: # verify
+                    configured_hugepages = int(f.read())
+                if configured_hugepages < wanted_count:
+                    print('WARNING: tried to configure %d hugepages for socket %d, but result is: %d' % (hugepages_count, socket_id, configured_hugepages))
+
+
+    def run_scapy_server(self):
+        if map_driver.parent_args and map_driver.parent_args.stl and not map_driver.parent_args.no_scapy_server:
+            try:
+                master_core = self.m_cfg_dict[0]['platform']['master_thread_id']
+            except:
+                master_core = 0
+            ret = os.system('%s scapy_daemon_server restart -c %s' % (sys.executable, master_core))
+            if ret:
+                print("Could not start scapy_daemon_server, which is needed by GUI to create packets.\nIf you don't need it, use --no-scapy-server flag.")
+                sys.exit(-1)
+
+
+    # check vdev Linux interfaces status
+    # return True if interfaces are vdev
+    def check_vdev(self, if_list):
+        if not if_list:
+            return
+        af_names = []
+        ifname_re = re.compile('iface\s*=\s*([^\s,]+)')
+        found_vdev  = False
+        found_pdev  = False
+        for iface in if_list:
+            if '--vdev' in iface:
+                found_vdev = True
+                if 'net_af_packet' in iface:
+                    res = ifname_re.search(iface)
+                    if res:
+                        af_names.append(res.group(1))
+            elif ':' not in iface: # no PCI => assume af_packet
+                found_vdev = True
+                af_names.append(iface)
+            else:
+                found_pdev = True
+        if found_vdev:
+            if found_pdev:
+                raise DpdkSetup('You have mix of vdev and pdev interfaces in config file!')
+            for name in af_names:
+                if not os.path.exists('/sys/class/net/%s' % name):
+                    raise DpdkSetup('ERROR: Could not find Linux interface %s.' % name)
+                oper_state = '/sys/class/net/%s/operstate' % name
+                if os.path.exists(oper_state):
+                    with open(oper_state) as f:
+                        f_cont = f.read().strip()
+                    if f_cont in ('down', 'DOWN'):
+                        raise DpdkSetup('ERROR: Requested Linux interface %s is DOWN.' % name)
+            return found_vdev
+
+    def check_trex_running(self, if_list):
+        if if_list and map_driver.args.parent and self.m_cfg_dict[0].get('enable_zmq_pub', True):
+            publisher_port = self.m_cfg_dict[0].get('zmq_pub_port', 4500)
+            pid = dpdk_nic_bind.get_tcp_port_usage(publisher_port)
+            if pid:
+                cmdline = dpdk_nic_bind.read_pid_cmdline(pid)
+                print('ZMQ port is used by following process:\npid: %s, cmd: %s' % (pid, cmdline))
+                sys.exit(-1)
 
     def do_run (self,only_check_all_mlx=False):
         """ return the number of mellanox drivers"""
@@ -611,12 +721,19 @@ Other network devices
                     if dev.get('Driver_str') in dpdk_nic_bind.dpdk_drivers + dpdk_nic_bind.dpdk_and_kernel:
                         if_list.append(dev['Slot'])
 
+        if self.check_vdev(if_list):
+            self.check_trex_running(if_list)
+            self.run_scapy_server()
+            # no need to config hugepages
+            return
+
         if_list = list(map(self.pci_name_to_full_name, if_list))
 
 
         # check how many mellanox cards we have
         Mellanox_cnt=0;
         for key in if_list:
+            key = self.split_pci_key(key)
             if key not in self.m_devices:
                 err=" %s does not exist " %key;
                 raise DpdkSetup(err)
@@ -642,14 +759,15 @@ Other network devices
                 self.check_ofed_version()
 
             for key in if_list:
+                key = self.split_pci_key(key)
                 if 'Virtual' not in self.m_devices[key]['Device_str']:
                     pci_id = self.m_devices[key]['Slot_str']
-                    self.tune_mlx5_device(pci_id)
+                    self.tune_mlx_device(pci_id)
                 if 'Interface' in self.m_devices[key]:
-                    dev_id=self.m_devices[key]['Interface']
-                    self.disable_flow_control_mlx5_device (dev_id)
-                    self.set_max_mtu_mlx5_device(dev_id)
-
+                    dev_ids = self.m_devices[key]['Interface'].split(",")
+                    for dev_id in dev_ids:
+                        self.disable_flow_control_mlx_device (dev_id)
+                        self.set_max_mtu_mlx_device(dev_id)
 
         if only_check_all_mlx:
             if Mellanox_cnt > 0:
@@ -657,29 +775,15 @@ Other network devices
             else:
                 sys.exit(0);
 
-        if if_list and map_driver.args.parent and self.m_cfg_dict[0].get('enable_zmq_pub', True):
-            publisher_port = self.m_cfg_dict[0].get('zmq_pub_port', 4500)
-            pid = dpdk_nic_bind.get_tcp_port_usage(publisher_port)
-            if pid:
-                cmdline = dpdk_nic_bind.read_pid_cmdline(pid)
-                print('ZMQ port is used by following process:\npid: %s, cmd: %s' % (pid, cmdline))
-                if not dpdk_nic_bind.confirm('Ignore and proceed (y/N):'):
-                    sys.exit(-1)
 
-        if map_driver.parent_args and map_driver.parent_args.stl and not map_driver.parent_args.no_scapy_server:
-            try:
-                master_core = self.m_cfg_dict[0]['platform']['master_thread_id']
-            except:
-                master_core = 0
-            ret = os.system('%s scapy_daemon_server restart -c %s' % (sys.executable, master_core))
-            if ret:
-                print("Could not start scapy_daemon_server, which is needed by GUI to create packets.\nIf you don't need it, use --no-scapy-server flag.")
-                sys.exit(-1)
-
+        self.check_trex_running(if_list)
+        self.config_hugepages() # should be after check of running TRex
+        self.run_scapy_server()
 
         Napatech_cnt=0;
         to_bind_list = []
         for key in if_list:
+            key = self.split_pci_key(key)
             if key not in self.m_devices:
                 err=" %s does not exist " %key;
                 raise DpdkSetup(err)
@@ -701,7 +805,9 @@ Other network devices
             if Mellanox_cnt:
                 ret = self.do_bind_all('mlx5_core', to_bind_list)
                 if ret:
-                    raise DpdkSetup('Unable to bind interfaces to driver mlx5_core.')
+                    ret = self.do_bind_all('mlx4_core', to_bind_list)
+                    if ret:
+                        raise DpdkSetup('Unable to bind interfaces to driver mlx5_core/mlx4_core.')
                 return MLX_EXIT_CODE
             else:
                 # if igb_uio is ready, use it as safer choice, afterwards try vfio-pci
@@ -782,6 +888,9 @@ Other network devices
             else:
                 print('Returning to Linux %s' % pci)
                 dpdk_nic_bind.bind_one(pci, linux_driver, False)
+
+    def split_pci_key(self, pci_id):
+        return pci_id.split('/')[0]
 
     def _get_cpu_topology(self):
         cpu_topology_file = '/proc/cpuinfo'
@@ -1060,11 +1169,18 @@ def parse_parent_cfg (parent_cfg):
     parent_parser.add_argument('--no-scapy-server', action = 'store_true')
     parent_parser.add_argument('--no-watchdog', action = 'store_true')
     parent_parser.add_argument('--astf', action = 'store_true')
+    parent_parser.add_argument('--limit-ports', type = int)
     parent_parser.add_argument('-f', dest = 'file')
+    parent_parser.add_argument('-t', dest = 'tunable',default=None)
     parent_parser.add_argument('-i', action = 'store_true', dest = 'stl', default = False)
     map_driver.parent_args, _ = parent_parser.parse_known_args(shlex.split(parent_cfg))
     if map_driver.parent_args.help:
         sys.exit(0)
+    if map_driver.parent_args.limit_ports is not None:
+        if map_driver.parent_args.limit_ports % 2:
+            raise DpdkSetup('ERROR: --limit-ports CLI argument must be even number, got: %s' % map_driver.parent_args.limit_ports)
+        if map_driver.parent_args.limit_ports <= 0:
+            raise DpdkSetup('ERROR: --limit-ports CLI argument must be positive, got: %s' % map_driver.parent_args.limit_ports)
 
 
 def process_options ():
@@ -1074,7 +1190,7 @@ Examples:
 ---------
 
 To return to Linux the DPDK bound interfaces (for ifconfig etc.)
-  sudo ./dpdk_set_ports.py -l
+  sudo ./dpdk_set_ports.py -L
 
 To create TRex config file using interactive mode
   sudo ./dpdk_set_ports.py -i
@@ -1092,7 +1208,7 @@ To see more detailed info on interfaces (table):
     description=" unbind dpdk interfaces ",
     epilog=" written by hhaim");
 
-    parser.add_argument("-l", "--linux", action='store_true',
+    parser.add_argument("-l", '-L', "--linux", action='store_true',
                       help=""" Return all DPDK interfaces to Linux driver """,
      )
 
@@ -1210,10 +1326,12 @@ def main ():
             obj.do_interactive_create();
         elif map_driver.args.linux:
             obj.do_return_to_linux();
-        elif not (map_driver.parent_args and map_driver.parent_args.dump_interfaces is not None):
+        elif map_driver.parent_args is None or map_driver.parent_args.dump_interfaces is None:
             ret = obj.do_run()
             print('The ports are bound/configured.')
             sys.exit(ret)
+        elif map_driver.parent_args.dump_interfaces:
+            obj.config_hugepages(1)
         print('')
     except DpdkSetup as e:
         print(e)

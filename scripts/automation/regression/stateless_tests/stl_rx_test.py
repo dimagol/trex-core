@@ -13,6 +13,13 @@ class STLRX_Test(CStlGeneral_Test):
 
     def setUp(self):
         per_driver_params = {
+            'net_af_packet': {
+                'rate_percent': 1,
+                'total_pkts': 50,
+                'rate_latency': 1,
+                'latency_9k_enable': False,
+                'no_vlan_even_in_software_mode': True,
+            },
             'net_vmxnet3': {
                 'rate_percent': 1,
                 'total_pkts': 50,
@@ -102,7 +109,7 @@ class STLRX_Test(CStlGeneral_Test):
                 'total_pkts': 1000,
                 'rate_latency': 1,
                 'latency_9k_enable': True,
-                'latency_9k_max_average': 150,
+                'latency_9k_max_average': 170,
                 'latency_9k_max_latency': 350,
                 'no_vlan': True,
                 'no_ipv6': True,
@@ -243,11 +250,9 @@ class STLRX_Test(CStlGeneral_Test):
         self.vm_9k_pkt = STLPktBuilder(pkt = Ether()/IP(src="16.0.0.1",dst="48.0.0.1")/UDP(dport=12,sport=1025)/('a'*8160)
                                        ,vm = vm)
 
-        self.mlx5_defect_dpdk1711 = False
-        self.mlx5_defect_dpdk1711_2 = False
-
         # skip mlx5 VF
         self.mlx5_defect_dpdk1711_3 = CTRexScenario.setup_name in ['trex23']
+        self.mlx5_defect_dpdk1711_trex_518 = CTRexScenario.setup_name in ['trex19']
         #self.mlx5_defect_dpdk1711_3 =False
 
 
@@ -461,9 +466,11 @@ class STLRX_Test(CStlGeneral_Test):
     # one stream on TX --> RX
     @try_few_times_on_vm
     def test_one_stream(self):
-        if self.mlx5_defect_dpdk1711:
-            self.skip('not running due to defect trex-505')
+        if self.drv_name == 'net_i40e_vf':
+            self.skip('Not running on i40 vf currently due to trex-513 ')
+
         total_pkts = self.total_pkts
+        self.c.reset()
         s1 = STLStream(name = 'rx',
                        packet = self.pkt,
                        flow_stats = STLFlowLatencyStats(pg_id = 5),
@@ -482,14 +489,12 @@ class STLRX_Test(CStlGeneral_Test):
 
     @try_few_times_on_vm
     def test_multiple_streams(self):
-        if self.mlx5_defect_dpdk1711:
-            self.skip('not running due to defect trex-505')
         self._test_multiple_streams(False)
 
     @try_few_times_on_vm
     def test_multiple_streams_random(self):
-        if self.mlx5_defect_dpdk1711_2:
-            self.skip('defect dpdk17_11 mlx5')
+        if self.mlx5_defect_dpdk1711_trex_518:
+            self.skip('Skip for mlx5_defect_dpdk1711_trex_518')
 
         if self.drv_name == 'net_i40e_vf':
             self.skip('Not running on i40 vf currently')
@@ -632,6 +637,7 @@ class STLRX_Test(CStlGeneral_Test):
             streams_data.append({'name': 'IPv6 flow stat. No latency', 'pkt': self.ipv6pkt, 'lat': False})
             streams_data.append({'name': 'IPv6 latency, no field engine', 'pkt': self.ipv6pkt, 'lat': True})
 
+        self.c.reset()
         streams = []
         for data in streams_data:
             if data['lat']:
@@ -728,6 +734,10 @@ class STLRX_Test(CStlGeneral_Test):
     # Verify that there is low latency with random packet size,duration and ports
     @try_few_times_on_vm
     def test_9k_stream(self):
+
+        if self.mlx5_defect_dpdk1711_trex_518:
+            self.skip('Skip for mlx5_defect_dpdk1711_trex_518')
+
         if self.is_virt_nics:
             self.skip('Skip this for virtual NICs')
 
@@ -872,6 +882,7 @@ class STLRX_Test(CStlGeneral_Test):
 
         total_pkts = self.total_pkts
         percent = 0.5
+        self.c.reset()
 
         try:
             # We run till maximum streams allowed. At some point, expecting drops, because rate is too high.

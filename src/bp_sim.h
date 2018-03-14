@@ -68,6 +68,7 @@ limitations under the License.
 #include "trex_global.h"
 #include "gtp/GtpTunnulizer.h"
 #include "gtp/cGtpTidSelectionLogic.h"
+#include "plat_support.h"
 
 
 /* stateless includes */
@@ -876,13 +877,7 @@ public:
 
 
 
-
-#if __x86_64__
-/* size of 64 bytes */
-    #define DEFER_CLIENTS_NUM (16)
-#else
-    #define DEFER_CLIENTS_NUM (16)
-#endif
+#define DEFER_CLIENTS_NUM (16)
 
 /* this class must be in the same size of CGenNode */
 struct CGenNodeDeferPort  {
@@ -1314,6 +1309,7 @@ public:
     uint64_t                  m_limit;
     CTimeHistogram            m_realtime_his;
     dsec_t                    m_scheduler_offset;
+    dsec_t                    nanosleep_overhead; // approx
 
     dsec_t                    m_last_sync_time_sec;
     dsec_t                    m_tw_level1_next_sec;
@@ -2956,7 +2952,7 @@ private:
 /* per thread info  */
 
 class CTcpPerThreadCtx;
-class CTcpAppProgram;
+class CEmulAppProgram;
 class CMbufBuffer;
 class CTcpCtxCb;
 class CSyncBarrier;
@@ -3191,8 +3187,9 @@ public:
     CTcpCtxCb             *         m_c_tcp_io;
     CTcpPerThreadCtx      *         m_s_tcp;
     CTcpCtxCb             *         m_s_tcp_io;
-    double                          m_tcp_fif_d_time;
     bool                            m_tcp_terminate;
+    bool                            m_sched_accurate;
+    uint32_t                        m_tcp_terminate_cnt;
 
 private:
     CSyncBarrier *                  m_sync_b;
@@ -3202,11 +3199,11 @@ public:
     bool Create_tcp();
     void Delete_tcp();
 
-    void tcp_generate_flow(bool &done);
+    void generate_flow(bool &done);
 
-    void tcp_handle_rx_flush(CGenNode * node,bool on_terminate);
-    void tcp_handle_tx_fif(CGenNode * node,bool on_terminate);
-    void tcp_handle_tw(CGenNode * node,bool on_terminate);
+    void handle_rx_flush(CGenNode * node,bool on_terminate);
+    void handle_tx_fif(CGenNode * node,bool on_terminate);
+    void handle_tw(CGenNode * node,bool on_terminate);
 
 
 private:
@@ -3472,5 +3469,19 @@ class CRXCoreIgnoreStat {
 
 static_assert(sizeof(CGenNodeNatInfo) == sizeof(CGenNode), "sizeof(CGenNodeNatInfo) != sizeof(CGenNode)" );
 static_assert(sizeof(CGenNodeLatencyPktInfo) == sizeof(CGenNode), "sizeof(CGenNodeLatencyPktInfo) != sizeof(CGenNode)" );
+
+static inline void rte_pause_or_delay_lowend() {
+    if (unlikely( CGlobalInfo::m_options.m_is_sleepy_scheduler )) {
+        delay_sec(LOWEND_LONG_SLEEP_SEC); // sleep for "long" time (highend would rte_pause)
+    } else {
+        rte_pause();
+    }
+}
+
+static inline void delay_lowend() {
+    if (unlikely( CGlobalInfo::m_options.m_is_sleepy_scheduler )) {
+        delay_sec(LOWEND_SHORT_SLEEP_SEC); // sleep for "short" time (highend would do nothing)
+    }
+}
 
 #endif

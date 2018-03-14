@@ -89,7 +89,7 @@ static rte_mbuf_t * utl_rte_convert_tx_rx_mbuf(rte_mbuf_t *m){
 
 
 int CTcpCtxDebug::on_flow_close(CTcpPerThreadCtx *ctx,
-                                CTcpFlow * flow){
+                                CFlowBase * flow){
     /* bothing to do */
 
     return(0);
@@ -107,7 +107,9 @@ int CTcpCtxDebug::on_tx(CTcpPerThreadCtx *ctx,
                         struct tcpcb * tp,
                         rte_mbuf_t *m){
     int dir=1;
-    if (tp->src_port==CLIENT_SIDE_PORT) {
+    assert(tp->m_flow);
+    
+    if (tp->m_flow->m_template.m_src_port==CLIENT_SIDE_PORT) {
         dir=0;
     }
     rte_mbuf_t *m_rx= utl_rte_convert_tx_rx_mbuf(m);
@@ -221,7 +223,7 @@ bool CClientServerTcp::Create(std::string out_dir,
 }
 
 // Set fictive association table to be used by server side in simulation
-void CClientServerTcp::set_assoc_table(uint16_t port, CTcpAppProgram *prog, CTcpTuneables *s_tune) {
+void CClientServerTcp::set_assoc_table(uint16_t port, CEmulAppProgram *prog, CTcpTuneables *s_tune) {
     m_tcp_data_ro.set_test_assoc_table(port, prog, s_tune);
     m_s_ctx.set_template_ro(&m_tcp_data_ro);
 }
@@ -397,14 +399,14 @@ int CClientServerTcp::test2(){
 
 
     CMbufBuffer * buf;
-    CTcpAppProgram * prog_c;
-    CTcpAppProgram * prog_s;
+    CEmulAppProgram * prog_c;
+    CEmulAppProgram * prog_s;
     CTcpFlow          *  c_flow;
     CTcpTuneables *s_tune;
 
-    CTcpApp * app_c;
-    //CTcpApp * app_s;
-    CTcpAppCmd cmd;
+    CEmulApp * app_c;
+    //CEmulApp * app_s;
+    CEmulAppCmd cmd;
 
     uint32_t tx_num_bytes=100*1024;
 
@@ -429,8 +431,8 @@ int CClientServerTcp::test2(){
 
     /* CONST */
     buf = new CMbufBuffer();
-    prog_c = new CTcpAppProgram();
-    prog_s = new CTcpAppProgram();
+    prog_c = new CEmulAppProgram();
+    prog_s = new CEmulAppProgram();
     s_tune = new CTcpTuneables();
 
     utl_mbuf_buffer_create_and_fill(0,buf,2048,tx_num_bytes);
@@ -448,7 +450,7 @@ int CClientServerTcp::test2(){
     /* server program */
 
     cmd.m_cmd =tcRX_BUFFER;
-    cmd.u.m_rx_cmd.m_flags =CTcpAppCmdRxBuffer::rxcmd_WAIT;
+    cmd.u.m_rx_cmd.m_flags =CEmulAppCmdRxBuffer::rxcmd_WAIT;
     cmd.u.m_rx_cmd.m_rx_bytes_wm = tx_num_bytes;
 
     prog_s->add_cmd(cmd);
@@ -621,18 +623,252 @@ void CClientServerTcp::dump_counters(){
 
 
 int CClientServerTcp::simple_http(){
+    using namespace std::placeholders;
+    method_program_cb_t cb = std::bind(&CClientServerTcp::build_http, this, _1, _2,_3,_4,_5);
+    return(simple_http_generic(cb));
+}
+
+/* end with RST from server side */
+int CClientServerTcp::simple_http_rst(){
+    using namespace std::placeholders;
+    method_program_cb_t cb = std::bind(&CClientServerTcp::build_http_rst, this, _1, _2,_3,_4,_5);
+    return(simple_http_generic(cb));
+}
+
+/* end with RST from server side */
+int CClientServerTcp::simple_http_fin_ack(){
+    using namespace std::placeholders;
+    method_program_cb_t cb = std::bind(&CClientServerTcp::build_http_fin_ack, this, _1, _2,_3,_4,_5);
+    return(simple_http_generic(cb));
+}
+
+int CClientServerTcp::simple_http_connect(){
+    using namespace std::placeholders;
+    method_program_cb_t cb = std::bind(&CClientServerTcp::build_http_connect, this, _1, _2,_3,_4,_5);
+    return(simple_http_generic(cb));
+}
+
+int CClientServerTcp::simple_http_connect_rst(){
+    using namespace std::placeholders;
+    method_program_cb_t cb = std::bind(&CClientServerTcp::build_http_connect_rst, this, _1, _2,_3,_4,_5);
+    return(simple_http_generic(cb));
+}
+
+int CClientServerTcp::simple_http_connect_rst2(){
+    using namespace std::placeholders;
+    method_program_cb_t cb = std::bind(&CClientServerTcp::build_http_connect_rst2, this, _1, _2,_3,_4,_5);
+    return(simple_http_generic(cb));
+}
+
+
+int CClientServerTcp::build_http(CMbufBuffer * buf_req,
+                                  CMbufBuffer * buf_res,
+                                  CEmulAppProgram * prog_c,
+                                  CEmulAppProgram * prog_s,
+                                  uint32_t http_r_size){
+    CEmulAppCmd cmd;
+
+    /* PER FLOW  */
+
+    /* client program */
+    cmd.m_cmd =tcTX_BUFFER;
+    cmd.u.m_tx_cmd.m_buf =buf_req;
+    prog_c->add_cmd(cmd);
+
+    cmd.m_cmd =tcRX_BUFFER ;
+    cmd.u.m_rx_cmd.m_flags =CEmulAppCmdRxBuffer::rxcmd_WAIT;
+    cmd.u.m_rx_cmd.m_rx_bytes_wm  =http_r_size;
+    prog_c->add_cmd(cmd);
+
+
+    /* server program */
+
+    cmd.m_cmd =tcRX_BUFFER;
+    cmd.u.m_rx_cmd.m_flags =CEmulAppCmdRxBuffer::rxcmd_WAIT;
+    cmd.u.m_rx_cmd.m_rx_bytes_wm = sizeof(http_req);
+    prog_s->add_cmd(cmd);
+
+    cmd.m_cmd = tcTX_BUFFER;
+    cmd.u.m_tx_cmd.m_buf =buf_res;
+    prog_s->add_cmd(cmd);
+    return(0);
+}
+
+int CClientServerTcp::build_http_rst(CMbufBuffer * buf_req,
+                                     CMbufBuffer * buf_res,
+                                     CEmulAppProgram * prog_c,
+                                     CEmulAppProgram * prog_s,
+                                     uint32_t http_r_size){
+    CEmulAppCmd cmd;
+
+    /* PER FLOW  */
+
+    /* client program */
+    cmd.m_cmd =tcTX_BUFFER;
+    cmd.u.m_tx_cmd.m_buf =buf_req;
+    prog_c->add_cmd(cmd);
+
+    cmd.m_cmd =tcRX_BUFFER ;
+    cmd.u.m_rx_cmd.m_flags =CEmulAppCmdRxBuffer::rxcmd_WAIT;
+    cmd.u.m_rx_cmd.m_rx_bytes_wm  =http_r_size;
+    prog_c->add_cmd(cmd);
+
+    cmd.m_cmd = tcRESET;
+    prog_c->add_cmd(cmd);
+
+
+    /* server program */
+
+    cmd.m_cmd =tcRX_BUFFER;
+    cmd.u.m_rx_cmd.m_flags =CEmulAppCmdRxBuffer::rxcmd_WAIT;
+    cmd.u.m_rx_cmd.m_rx_bytes_wm = sizeof(http_req);
+    prog_s->add_cmd(cmd);
+
+    cmd.m_cmd = tcTX_BUFFER;
+    cmd.u.m_tx_cmd.m_buf =buf_res;
+    prog_s->add_cmd(cmd);
+
+    cmd.m_cmd = tcDONT_CLOSE;
+    prog_s->add_cmd(cmd);
+
+    
+    return(0);
+}
+
+int CClientServerTcp::build_http_fin_ack(CMbufBuffer * buf_req,
+                                     CMbufBuffer * buf_res,
+                                     CEmulAppProgram * prog_c,
+                                     CEmulAppProgram * prog_s,
+                                     uint32_t http_r_size){
+    CEmulAppCmd cmd;
+
+    /* PER FLOW  */
+
+    /* client program */
+    cmd.m_cmd =tcTX_BUFFER;
+    cmd.u.m_tx_cmd.m_buf =buf_req;
+    prog_c->add_cmd(cmd);
+
+    cmd.m_cmd =tcRX_BUFFER ;
+    cmd.u.m_rx_cmd.m_flags =CEmulAppCmdRxBuffer::rxcmd_WAIT;
+    cmd.u.m_rx_cmd.m_rx_bytes_wm  =http_r_size;
+    prog_c->add_cmd(cmd);
+
+
+
+    /* server program */
+
+    cmd.m_cmd =tcRX_BUFFER;
+    cmd.u.m_rx_cmd.m_flags =CEmulAppCmdRxBuffer::rxcmd_WAIT;
+    cmd.u.m_rx_cmd.m_rx_bytes_wm = sizeof(http_req);
+    prog_s->add_cmd(cmd);
+
+    cmd.m_cmd = tcTX_BUFFER;
+    cmd.u.m_tx_cmd.m_buf =buf_res;
+    prog_s->add_cmd(cmd);
+
+    cmd.m_cmd = tcDONT_CLOSE;
+    prog_s->add_cmd(cmd);
+
+    
+    return(0);
+}
+
+int CClientServerTcp::build_http_connect(CMbufBuffer * buf_req,
+                                         CMbufBuffer * buf_res,
+                                         CEmulAppProgram * prog_c,
+                                         CEmulAppProgram * prog_s,
+                                         uint32_t http_r_size){
+    CEmulAppCmd cmd;
+
+    /* PER FLOW  */
+
+    /* client program */
+    cmd.m_cmd =tcCONNECT_WAIT;
+    cmd.u.m_tx_cmd.m_buf =buf_req;
+    prog_c->add_cmd(cmd);
+
+    cmd.m_cmd =tcTX_BUFFER;
+    cmd.u.m_tx_cmd.m_buf =buf_req;
+    prog_c->add_cmd(cmd);
+
+    cmd.m_cmd =tcRX_BUFFER ;
+    cmd.u.m_rx_cmd.m_flags =CEmulAppCmdRxBuffer::rxcmd_WAIT;
+    cmd.u.m_rx_cmd.m_rx_bytes_wm  =http_r_size;
+    prog_c->add_cmd(cmd);
+
+
+    /* server program */
+    cmd.m_cmd =tcRX_BUFFER;
+    cmd.u.m_rx_cmd.m_flags =CEmulAppCmdRxBuffer::rxcmd_WAIT;
+    cmd.u.m_rx_cmd.m_rx_bytes_wm = sizeof(http_req);
+    prog_s->add_cmd(cmd);
+
+    cmd.m_cmd = tcTX_BUFFER;
+    cmd.u.m_tx_cmd.m_buf =buf_res;
+    prog_s->add_cmd(cmd);
+
+    cmd.m_cmd = tcDONT_CLOSE;
+    prog_s->add_cmd(cmd);
+
+    
+    return(0);
+}
+
+int CClientServerTcp::build_http_connect_rst(CMbufBuffer * buf_req,
+                                         CMbufBuffer * buf_res,
+                                         CEmulAppProgram * prog_c,
+                                         CEmulAppProgram * prog_s,
+                                         uint32_t http_r_size){
+    CEmulAppCmd cmd;
+
+    /* PER FLOW  */
+
+    /* client program */
+    cmd.m_cmd =tcCONNECT_WAIT;
+    prog_c->add_cmd(cmd);
+
+    cmd.m_cmd =tcRESET;
+    prog_c->add_cmd(cmd);
+
+
+    cmd.m_cmd = tcDONT_CLOSE;
+    prog_s->add_cmd(cmd);
+    
+    return(0);
+}
+
+int CClientServerTcp::build_http_connect_rst2(CMbufBuffer * buf_req,
+                                         CMbufBuffer * buf_res,
+                                         CEmulAppProgram * prog_c,
+                                         CEmulAppProgram * prog_s,
+                                         uint32_t http_r_size){
+    CEmulAppCmd cmd;
+
+    /* PER FLOW  */
+
+    /* client program */
+    cmd.m_cmd =tcRESET;
+    prog_c->add_cmd(cmd);
+
+    cmd.m_cmd = tcDONT_CLOSE;
+    prog_s->add_cmd(cmd);
+    
+    return(0);
+}
+
+
+int CClientServerTcp::simple_http_generic(method_program_cb_t cb){
 
 
     CMbufBuffer * buf_req;
     CMbufBuffer * buf_res;
-    CTcpAppProgram * prog_c;
-    CTcpAppProgram * prog_s;
+    CEmulAppProgram * prog_c;
+    CEmulAppProgram * prog_s;
     CTcpFlow          *  c_flow;
     CTcpTuneables *s_tune;
 
-    CTcpApp * app_c;
-    //CTcpApp * app_s;
-    CTcpAppCmd cmd;
+    CEmulApp * app_c;
     uint32_t http_r_size=32*1024;
 
     if (m_mss) {
@@ -670,8 +906,8 @@ int CClientServerTcp::simple_http(){
     buf_req = new CMbufBuffer();
     buf_res = new CMbufBuffer();
 
-    prog_c = new CTcpAppProgram();
-    prog_s = new CTcpAppProgram();
+    prog_c = new CEmulAppProgram();
+    prog_s = new CEmulAppProgram();
     s_tune = new CTcpTuneables();
 
 
@@ -680,30 +916,8 @@ int CClientServerTcp::simple_http(){
     utl_mbuf_buffer_create_and_copy(0,buf_req,2048,(uint8_t*)http_req,sizeof(http_req));
     utl_mbuf_buffer_create_and_copy(0,buf_res,2048,(uint8_t*)http_r,http_r_size);
 
+    cb(buf_req,buf_res,prog_c,prog_s,http_r_size);
 
-    /* PER FLOW  */
-
-    /* client program */
-    cmd.m_cmd =tcTX_BUFFER;
-    cmd.u.m_tx_cmd.m_buf =buf_req;
-    prog_c->add_cmd(cmd);
-
-    cmd.m_cmd =tcRX_BUFFER ;
-    cmd.u.m_rx_cmd.m_flags =CTcpAppCmdRxBuffer::rxcmd_WAIT;
-    cmd.u.m_rx_cmd.m_rx_bytes_wm  =http_r_size;
-    prog_c->add_cmd(cmd);
-
-
-    /* server program */
-
-    cmd.m_cmd =tcRX_BUFFER;
-    cmd.u.m_rx_cmd.m_flags =CTcpAppCmdRxBuffer::rxcmd_WAIT;
-    cmd.u.m_rx_cmd.m_rx_bytes_wm = sizeof(http_req);
-    prog_s->add_cmd(cmd);
-
-    cmd.m_cmd = tcTX_BUFFER;
-    cmd.u.m_tx_cmd.m_buf =buf_res;
-    prog_s->add_cmd(cmd);
 
 
     app_c->set_program(prog_c);
@@ -774,9 +988,9 @@ int CClientServerTcp::simple_http(){
 }
 
 int CClientServerTcp::fill_from_file() {
-    CTcpAppProgram *prog_c;
+    CEmulAppProgram *prog_c;
     CTcpFlow *c_flow;
-    CTcpApp *app_c;
+    CEmulApp *app_c;
 
     CAstfDbRO * ro_db=CAstfDB::instance()->get_db_ro(0);
     uint16_t dst_port = ro_db->get_dport(0);
@@ -805,6 +1019,12 @@ int CClientServerTcp::fill_from_file() {
 
     uint16_t temp_index = 0;
     prog_c = ro_db->get_client_prog(temp_index);
+    if (prog_c->is_stream() == false) {
+        printf(" \n");
+        printf(" ERROR try using simulator with --full, none-stream program is not supported in simple mode\n");
+        printf(" \n");
+        exit(-1);
+    }
     // tunables setting currently does not work with this simulation.
     // need to do something like
     // c_flow->set_c_tcp_info(rw_db, temp_index);
@@ -812,8 +1032,8 @@ int CClientServerTcp::fill_from_file() {
     m_s_ctx.set_template_ro(ro_db);
 
     if (m_debug) {
-        CTcpServreInfo * s_info = ro_db->get_server_info_by_port(dst_port);
-        CTcpAppProgram *prog_s = s_info->get_prog();
+        CTcpServreInfo * s_info = ro_db->get_server_info_by_port(dst_port,true);
+        CEmulAppProgram *prog_s = s_info->get_prog();
         prog_c->Dump(stdout);
         prog_s->Dump(stdout);
     }

@@ -421,6 +421,23 @@ public:
 
 };
 
+class CTRexExtendedDriverAfPacket : public CTRexExtendedDriverVirtBase {
+public:
+    CTRexExtendedDriverAfPacket(){
+        CGlobalInfo::set_queues_mode(CGlobalInfo::Q_MODE_ONE_QUEUE);
+        m_cap = 0;
+    }
+    static CTRexExtendedDriverBase * create(){
+        return ( new CTRexExtendedDriverAfPacket() );
+    }
+    virtual void get_dpdk_drv_params(CTrexDpdkParams &p) {
+        CTRexExtendedDriverVirtBase::get_dpdk_drv_params(p);
+        p.rx_mbuf_type = MBUF_9k;
+    }
+    virtual bool get_extended_stats(CPhyEthIF * _if,CPhyEthIFStats *stats);
+    virtual void update_configuration(port_cfg_t * cfg);
+};
+
 class CTRexExtendedDriverBase10G : public CTRexExtendedDriverBase {
 public:
     CTRexExtendedDriverBase10G(){
@@ -833,6 +850,9 @@ private:
         register_driver(std::string("net_i40e_vf"), CTRexExtendedDriverI40evf::create);
         register_driver(std::string("net_ixgbe_vf"), CTRexExtendedDriverIxgbevf::create);
 
+        /* raw socket */
+        register_driver(std::string("net_af_packet"), CTRexExtendedDriverAfPacket::create);
+
         m_driver_was_set=false;
         m_drv=0;
         m_driver_name="";
@@ -910,6 +930,7 @@ enum {
        OPT_NODE_DUMP,
        OPT_DUMP_INTERFACES,
        OPT_UT,
+       OPT_PROM, 
        OPT_CORES,
        OPT_SINGLE_CORE,
        OPT_FLIP_CLIENT_SERVER,
@@ -951,6 +972,7 @@ enum {
        OPT_CHECKSUM_OFFLOAD,
        OPT_CHECKSUM_OFFLOAD_DISABLE,
        OPT_TSO_OFFLOAD_DISABLE,
+       OPT_LRO_OFFLOAD_DISABLE,
        OPT_CLOSE,
        OPT_ARP_REF_PER,
        OPT_NO_OFED_CHECK,
@@ -964,7 +986,11 @@ enum {
        OPT_NTACC_SO,
        OPT_ASTF_SERVR_ONLY,
        OPT_ASTF_CLIENT_MASK,
+       OPT_ASTF_TUNABLE,
        OPT_NO_TERMIO,
+       OPT_QUEUE_DROP,
+       OPT_ASTF_EMUL_DEBUG, 
+       OPT_SLEEPY_SCHEDULER,
     
        /* no more pass this */
        OPT_MAX
@@ -986,6 +1012,7 @@ static CSimpleOpt::SOption parser_options[] =
         { OPT_HELP,                   "--help",            SO_NONE    },
         { OPT_UT,                     "--ut",              SO_NONE    },
         { OPT_MODE_BATCH,             "-f",                SO_REQ_SEP },
+        { OPT_PROM,                   "--prom",            SO_NONE },
         { OPT_MODE_INTERACTIVE,       "-i",                SO_NONE    },
         { OPT_PLAT_CFG_FILE,          "--cfg",             SO_REQ_SEP },
         { OPT_SINGLE_CORE,            "-s",                SO_NONE    },
@@ -1030,7 +1057,8 @@ static CSimpleOpt::SOption parser_options[] =
         { OPT_ALLOW_COREDUMP,         "--allow-coredump",  SO_NONE    },
         { OPT_CHECKSUM_OFFLOAD,       "--checksum-offload", SO_NONE   },
         { OPT_CHECKSUM_OFFLOAD_DISABLE, "--checksum-offload-disable", SO_NONE   },
-        { OPT_TSO_OFFLOAD_DISABLE, "--tso-disable", SO_NONE   },
+        { OPT_TSO_OFFLOAD_DISABLE,  "--tso-disable", SO_NONE   },
+        { OPT_LRO_OFFLOAD_DISABLE,  "--lro-disable", SO_NONE   },
         { OPT_ACTIVE_FLOW,            "--active-flows",   SO_REQ_SEP  },
         { OPT_NTACC_SO,               "--ntacc-so", SO_NONE    },
         { OPT_MLX5_SO,                "--mlx5-so", SO_NONE    },
@@ -1041,10 +1069,14 @@ static CSimpleOpt::SOption parser_options[] =
         { OPT_NO_SCAPY_SERVER,        "--no-scapy-server", SO_NONE    },
         { OPT_RT,                     "--rt",              SO_NONE    },
         { OPT_TCP_MODE,               "--astf",            SO_NONE},
+        { OPT_ASTF_EMUL_DEBUG,        "--astf-emul-debug",  SO_NONE},
         { OPT_STL_MODE,               "--stl",             SO_NONE},
         { OPT_ASTF_SERVR_ONLY,        "--astf-server-only",            SO_NONE},
         { OPT_ASTF_CLIENT_MASK,       "--astf-client-mask",SO_REQ_SEP},
-        { OPT_NO_TERMIO,              "--no-termio", SO_NONE},
+        { OPT_ASTF_TUNABLE,           "-t",                SO_REQ_SEP},
+        { OPT_NO_TERMIO,              "--no-termio",       SO_NONE},
+        { OPT_QUEUE_DROP,             "--queue-drop",      SO_NONE},
+        { OPT_SLEEPY_SCHEDULER,       "--sleeps",          SO_NONE},
 
         SO_END_OF_OPTIONS
     };
@@ -1074,7 +1106,8 @@ static int usage(){
     printf(" --cfg <file>               : Use file as TRex config file instead of the default /etc/trex_cfg.yaml \n");
     printf(" --checksum-offload         : Deprecated,enable by default. Enable IP, TCP and UDP tx checksum offloading, using DPDK. This requires all used interfaces to support this  \n");
     printf(" --checksum-offload-disable : Disable IP, TCP and UDP tx checksum offloading, using DPDK. This requires all used interfaces to support this  \n");
-    printf(" --tso-disable              : disable TSO in case of advanced TCP mode \n");
+    printf(" --tso-disable              : disable TSO (advanced TCP mode) \n");
+    printf(" --lro-disable              : disable LRO (advanced TCP mode) \n");
     printf(" --client_cfg <file>        : YAML file describing clients configuration \n");
     printf(" --close-at-end             : Call rte_eth_dev_stop and close at exit. Calling these functions caused link down issues in older versions, \n");
     printf("                               so we do not call them by default for now. Leaving this as option in case someone thinks it is helpful for him \n");
@@ -1102,7 +1135,7 @@ static int usage(){
     printf(" --learn-verify             : Test the NAT translation mechanism. Should be used when there is no NAT in the setup \n");
     printf(" --limit-ports              : Limit number of ports used. Must be even number (TRex always uses port pairs) \n");
     printf(" --lm                       : Hex mask of cores that should send traffic \n");
-    printf("    For example: Value of 0x5 will cause only ports 0 and 2 to send traffic \n");
+    printf("                              For example: Value of 0x5 will cause only ports 0 and 2 to send traffic \n");
     printf(" --lo                       : Only run latency test \n");
     printf(" -m <num>                   : Rate multiplier.  Multiply basic rate of templates by this number \n");
     printf(" --mbuf-factor              : Factor for packet memory \n");
@@ -1113,23 +1146,27 @@ static int usage(){
     printf(" --no-key                   : Daemon mode, don't get input from keyboard \n");
     printf(" --no-ofed-check            : Disable the check of OFED version \n");
     printf(" --no-scapy-server          : Disable Scapy server implicit start at stateless \n");
+    printf(" --no-termio                : Do not use TERMIO. useful when using GDB and ctrl+c is needed. \n");
     printf(" --no-watchdog              : Disable watchdog \n");
     printf(" --rt                       : Run TRex DP/RX cores in realtime priority \n");
     printf(" -p                         : Send all flow packets from the same interface (choosed randomly between client ad server ports) without changing their src/dst IP \n");
     printf(" -pm                        : Platform factor. If you have splitter in the setup, you can multiply the total results by this factor \n");
-    printf("    e.g --pm 2.0 will multiply all the results bps in this factor \n");
+    printf("                              e.g --pm 2.0 will multiply all the results bps in this factor \n");
     printf(" --prefix <nam>             : For running multi TRex instances on the same machine. Each instance should have different name \n");
+    printf(" --prom                     : Enable promiscuous for ASTF/STF mode  \n");
     printf(" -pubd                      : Disable monitors publishers \n");
+    printf(" --queue-drop               : Do not retry to send packets on failure (queue full etc.)\n");
     printf(" --rx-check  <rate>         : Enable rx check. TRex will sample flows at 1/rate and check order, latency and more \n");
     printf(" -s                         : Single core. Run only one data path core. For debug \n");
     printf(" --send-debug-pkt <proto>   : Do not run traffic generator. Just send debug packet and dump receive queues \n");
-    printf("    Supported protocols are 1 for icmp, 2 for UDP, 3 for TCP, 4 for ARP, 5 for 9K UDP \n");
+    printf("                              Supported protocols are 1 for icmp, 2 for UDP, 3 for TCP, 4 for ARP, 5 for 9K UDP \n");
+    printf(" --sleeps                   : Use sleeps instead of busy wait in scheduler (less accurate, more power saving)\n");
     printf(" --software                 : Do not configure any hardware rules. In this mode we use 1 core, and one RX queue and one TX queue per port\n");
     printf(" -v <verbosity level>       : The higher the value, print more debug information \n");
     printf(" --vlan                     : Relevant only for stateless mode with Intel 82599 10G NIC \n");
     printf("                              When configuring flow stat and latency per stream rules, assume all streams uses VLAN \n");
     printf(" -w  <num>                  : Wait num seconds between init of interfaces and sending traffic, default is 1 \n");
-    printf(" --no-termio                : Do not use TERMIO. useful when using GDB and ctrl+c is needed. \n");
+    
 
     printf("\n");
     printf(" Examples: ");
@@ -1227,6 +1264,13 @@ static void check_exclusive(const OptHash &args_set,
     }
 }
 
+struct ParsingOptException : public std::exception {
+    const ESOError m_err_code;
+    const char    *m_opt_text;
+    ParsingOptException(CSimpleOpt &args):
+                    m_err_code(args.LastError()),
+                    m_opt_text(args.OptionText()) {}
+};
 
 static OptHash
 args_first_pass(int argc, char *argv[], CParserOption* po) {
@@ -1240,6 +1284,9 @@ args_first_pass(int argc, char *argv[], CParserOption* po) {
     
     /* set */
     while (args.Next()) {
+        if (args.LastError() != SO_SUCCESS) {
+            throw ParsingOptException(args);
+        }
         args_set[args.OptionId()] = true;
     }
     
@@ -1276,6 +1323,7 @@ static int parse_options(int argc, char *argv[], CParserOption* po, bool first_t
     (void)latency_was_set;
     char ** rgpszArg = NULL;
     bool opt_vlan_was_set = false;
+    bool is_single_core = false;
 
     int a=0;
     int node_dump=0;
@@ -1303,6 +1351,9 @@ static int parse_options(int argc, char *argv[], CParserOption* po, bool first_t
                 usage();
                 return -1;
 
+            case OPT_ASTF_EMUL_DEBUG:
+                po->preview.setEmulDebug(true);
+                break;
             /* astf */
             case OPT_TCP_MODE:
                 /* can be batch or non batch */
@@ -1317,7 +1368,9 @@ static int parse_options(int argc, char *argv[], CParserOption* po, bool first_t
             case OPT_ASTF_SERVR_ONLY:
                 po->m_astf_mode = CParserOption::OP_ASTF_MODE_SERVR_ONLY;
                 break;
-
+            case OPT_ASTF_TUNABLE:
+                /* do bothing with it */
+                break;
             case OPT_ASTF_CLIENT_MASK:
                 po->m_astf_mode = CParserOption::OP_ASTF_MODE_CLIENT_MASK;
                 sscanf(args.OptionArg(),"%x", &po->m_astf_client_mask);
@@ -1325,6 +1378,10 @@ static int parse_options(int argc, char *argv[], CParserOption* po, bool first_t
 
             case OPT_MODE_BATCH:
                 po->cfg_file = args.OptionArg();
+                break;
+
+            case OPT_PROM :
+                po->preview.setPromMode(true);
                 break;
 
             case OPT_MODE_INTERACTIVE:
@@ -1503,7 +1560,7 @@ static int parse_options(int argc, char *argv[], CParserOption* po, bool first_t
 
             case OPT_VIRT_ONE_TX_RX_QUEUE:
                 CGlobalInfo::set_queues_mode(CGlobalInfo::Q_MODE_ONE_QUEUE);
-                po->preview.setCores(1); // Only one TX core supported in software mode currently
+                is_single_core = true; // Only one TX core supported in software mode currently
                 break;
 
             case OPT_PREFIX:
@@ -1526,7 +1583,9 @@ static int parse_options(int argc, char *argv[], CParserOption* po, bool first_t
             case OPT_TSO_OFFLOAD_DISABLE:
                 po->preview.setTsoOffloadDisable(true);
                 break;
-
+            case OPT_LRO_OFFLOAD_DISABLE:
+                po->preview.setLroOffloadDisable(true);
+                break;
             case OPT_CLOSE:
                 po->preview.setCloseEnable(true);
                 break;
@@ -1538,6 +1597,12 @@ static int parse_options(int argc, char *argv[], CParserOption* po, bool first_t
                 break;
             case OPT_NO_SCAPY_SERVER:
                 break;
+            case OPT_QUEUE_DROP:
+                CGlobalInfo::m_options.m_is_queuefull_retry = false;
+                break;
+            case OPT_SLEEPY_SCHEDULER:
+                CGlobalInfo::m_options.m_is_sleepy_scheduler = true;
+                break;
 
             default:
                 printf("Error: option %s is not handled.\n\n", args.OptionText());
@@ -1546,13 +1611,7 @@ static int parse_options(int argc, char *argv[], CParserOption* po, bool first_t
             } // End of switch
         }// End of IF
         else {
-            if (args.LastError() == SO_OPT_INVALID) {
-                printf("Error: option %s is not recognized.\n\n", args.OptionText());
-            } else if (args.LastError() == SO_ARG_MISSING) {
-                printf("Error: option %s is expected to have argument.\n\n", args.OptionText());
-            }
-            usage();
-            return -1;
+            throw ParsingOptException(args);
         }
     } // End of while
 
@@ -1561,8 +1620,11 @@ static int parse_options(int argc, char *argv[], CParserOption* po, bool first_t
     if (po->m_op_mode == CParserOption::OP_MODE_INVALID) {
         po->m_op_mode = ( (args_set.at(OPT_MODE_INTERACTIVE)) ? CParserOption::OP_MODE_STL : CParserOption::OP_MODE_STF);
     }
-    
-    
+
+    if ( is_single_core || CGlobalInfo::m_options.m_is_lowend ) {
+        po->preview.setCores(1);
+    }
+
     if (CGlobalInfo::is_learn_mode() && po->preview.get_ipv6_mode_enable()) {
         parse_err("--learn mode is not supported with --ipv6, beacuse there is no such thing as NAT66 (ipv6 to ipv6 translation) \n" \
                   "If you think it is important, please open a defect or write to TRex mailing list\n");
@@ -1579,8 +1641,17 @@ static int parse_options(int argc, char *argv[], CParserOption* po, bool first_t
         po->preview.setVMode(a);
     }
 
+    if (po->m_platform_factor==0.0){
+        parse_err(" you must provide a non zero multipler for platform -pm 0 is not valid \n");
+    }
+
     /* if we have a platform factor we need to devided by it so we can still work with normalized yaml profile  */
     po->m_factor = po->m_factor/po->m_platform_factor;
+
+    if (po->m_factor==0.0) {
+        parse_err(" you must provide a non zero multipler -m 0 is not valid \n");
+    }
+
 
     if ( first_time ){
         /* only first time read the configuration file */
@@ -1639,7 +1710,18 @@ static int parse_options_wrapper(int argc, char *argv[], CParserOption* po, bool
     for(int i=0; i<argc; i++) {
         argv_copy[i] = strdup(argv[i]);
     }
-    int ret = parse_options(argc, argv_copy, po, first_time);
+    int ret = 0;
+    try {
+        ret = parse_options(argc, argv_copy, po, first_time);
+    } catch (ParsingOptException &e) {
+        if (e.m_err_code == SO_OPT_INVALID) {
+            printf("Error: option %s is not recognized.\n\n", e.m_opt_text);
+        } else if (e.m_err_code == SO_ARG_MISSING) {
+            printf("Error: option %s is expected to have argument.\n\n", e.m_opt_text);
+        }
+        usage();
+        return -1;
+    }
 
     // free
     for(int i=0; i<argc; i++) {
@@ -1700,6 +1782,11 @@ public:
 
     inline void update_var(void){
         get_ex_drv()->update_configuration(this);
+        if ( m_port_conf.rxmode.enable_lro && 
+            CGlobalInfo::m_options.preview.getLroOffloadDisable()  ) {
+            m_port_conf.rxmode.enable_lro=0;
+            printf("Warning LRO is supported and asked to be disabled by user \n");
+        }
     }
 
     inline void update_global_config_fdir(void){
@@ -2048,10 +2135,10 @@ void DpdkTRexPortAttr::update_description(){
     struct rte_eth_dev_info dev_info;
     rte_eth_dev_info_get(m_repid , &dev_info);
     pci_addr = &(dev_info.pci_dev->addr);
-    if (pci_addr) {
+    if (dev_info.pci_dev && pci_addr) {
         rte_pci_device_name(pci_addr,pci, sizeof(pci));
         intf_info_st.pci_addr = pci;
-    }else{
+    } else {
         intf_info_st.pci_addr="none";
     }
     pci_envvar_name = "pci" + intf_info_st.pci_addr;
@@ -2639,47 +2726,32 @@ void CCoreEthIF::DumpIfStats(FILE *fd){
  * this will allow us actually measure the max B/W possible 
  * without the noise of retrying 
  */
-#ifndef TREX_PERF
-#define DELAY_IF_NEEDED
-#endif
 
 int CCoreEthIF::send_burst(CCorePerPort * lp_port,
                            uint16_t len,
                            CVirtualIFPerSideStats  * lp_stats){
 
-#ifdef DEBUG_SEND_BURST
-    if (CGlobalInfo::m_options.preview.getVMode() > 10) {
-        fprintf(stdout, "send_burst port:%d queue:%d len:%d\n", (int)lp_port->m_port->get_repid()
-                , lp_port->m_tx_queue_id, len);
-        for (int i = 0; i < lp_port->m_len; i++) {
-            fprintf(stdout, "packet %d:\n", i);
-            rte_mbuf_t *m = lp_port->m_table[i];
-            utl_DumpBuffer(stdout, rte_pktmbuf_mtod(m, uint8_t*), rte_pktmbuf_pkt_len(m), 0);
-        }
-    }
-#endif
-
     uint16_t ret = lp_port->m_port->tx_burst(lp_port->m_tx_queue_id,lp_port->m_table,len);
-#ifdef DELAY_IF_NEEDED
-    while ( unlikely( ret<len ) ){
-        rte_delay_us(1);
-        lp_stats->m_tx_queue_full += 1;
-        uint16_t ret1=lp_port->m_port->tx_burst(lp_port->m_tx_queue_id,
-                                                &lp_port->m_table[ret],
-                                                len-ret);
-        ret+=ret1;
-    }
-#else
-    /* CPU has burst of packets larger than TX can send. Need to drop packets */
-    if ( unlikely(ret < len) ) {
-        lp_stats->m_tx_drop += (len-ret);
-        uint16_t i;
-        for (i=ret; i<len;i++) {
-            rte_mbuf_t * m=lp_port->m_table[i];
-            rte_pktmbuf_free(m);
+    if (likely( CGlobalInfo::m_options.m_is_queuefull_retry )) {
+        while ( unlikely( ret<len ) ){
+            rte_delay_us(1);
+            lp_stats->m_tx_queue_full += 1;
+            uint16_t ret1=lp_port->m_port->tx_burst(lp_port->m_tx_queue_id,
+                                                    &lp_port->m_table[ret],
+                                                    len-ret);
+            ret+=ret1;
+        }
+    } else {
+        /* CPU has burst of packets larger than TX can send. Need to drop packets */
+        if ( unlikely(ret < len) ) {
+            lp_stats->m_tx_drop += (len-ret);
+            uint16_t i;
+            for (i=ret; i<len;i++) {
+                rte_mbuf_t * m=lp_port->m_table[i];
+                rte_pktmbuf_free(m);
+            }
         }
     }
-#endif
 
     return (0);
 }
@@ -2710,22 +2782,19 @@ int CCoreEthIF::send_pkt_lat(CCorePerPort *lp_port, rte_mbuf_t *m, CVirtualIFPer
 
     int ret = lp_port->m_port->tx_burst(lp_port->m_tx_queue_id_lat, &m, 1);
 
-#ifdef DELAY_IF_NEEDED
-    while ( unlikely( ret != 1 ) ){
-        rte_delay_us(1);
-        lp_stats->m_tx_queue_full += 1;
-        ret = lp_port->m_port->tx_burst(lp_port->m_tx_queue_id_lat, &m, 1);
+    if (likely( CGlobalInfo::m_options.m_is_queuefull_retry )) {
+        while ( unlikely( ret != 1 ) ){
+            rte_delay_us(1);
+            lp_stats->m_tx_queue_full += 1;
+            ret = lp_port->m_port->tx_burst(lp_port->m_tx_queue_id_lat, &m, 1);
+        }
+    } else {
+        if ( unlikely( ret != 1 ) ) {
+            lp_stats->m_tx_drop ++;
+            rte_pktmbuf_free(m);
+            return 0;
+        }
     }
-
-#else
-    if ( unlikely( ret != 1 ) ) {
-        lp_stats->m_tx_drop ++;
-        rte_pktmbuf_free(m);
-        return 0;
-    }
-
-#endif
-
     return ret;
 }
 
@@ -2918,6 +2987,7 @@ void CCoreEthIF::handle_slowpath_features(CGenNode *node, rte_mbuf_t *m, uint8_t
 
     /* flag is faster than checking the node pointer (another cacheline) */
     if ( unlikely(CGlobalInfo::m_options.preview.get_is_client_cfg_enable() ) ) {
+        assert(node->m_client_cfg);
         node->m_client_cfg->apply(m, dir);
     }
 
@@ -3715,13 +3785,6 @@ public:
     int start_master_statefull();
     int start_master_stateless();
     int run_in_core(virtual_thread_id_t virt_core_id);
-    int core_for_rx(){
-        if ( (! get_is_rx_thread_enabled()) ) {
-            return -1;
-        }else{
-            return m_max_cores - 1;
-        }
-    }
     int run_in_rx_core();
     int run_in_master();
 
@@ -4208,6 +4271,10 @@ int  CGlobalTRex::ixgbe_start(void){
         _if->conf_queues();
         _if->stats_clear();
         _if->start();
+        if (CGlobalInfo::m_options.preview.getPromMode()) {
+            _if->get_port_attr()->set_promiscuous(true);
+            _if->get_port_attr()->set_multicast(true);
+        }
 
         _if->configure_rx_duplicate_rules();
 
@@ -4342,12 +4409,13 @@ bool CGlobalTRex::Create(){
     CTrexDpdkParams dpdk_p;
     get_ex_drv()->get_dpdk_drv_params(dpdk_p);
 
+    bool use_hugepages = !CGlobalInfo::m_options.m_is_vdev;
     CGlobalInfo::init_pools(m_max_ports *
                             (dpdk_p.rx_data_q_num * dpdk_p.rx_desc_num_data_q +
-                             dpdk_p.rx_drop_q_num * dpdk_p.rx_desc_num_drop_q)
-                            , dpdk_p.rx_mbuf_type);
-  
-     
+                             dpdk_p.rx_drop_q_num * dpdk_p.rx_desc_num_drop_q),
+                            dpdk_p.rx_mbuf_type,
+                            use_hugepages);
+
     ixgbe_start();
     dump_config(stdout);
     m_start_sync =new CSyncBarrier(get_cores_tx(),1.0);
@@ -4505,7 +4573,11 @@ void CGlobalTRex::Delete(){
 
 int  CGlobalTRex::ixgbe_prob_init(void){
 
-    m_max_ports  = port_map.get_max_num_ports();
+    if ( CGlobalInfo::m_options.m_is_vdev ) {
+        m_max_ports = rte_eth_dev_count();
+    } else {
+        m_max_ports = port_map.get_max_num_ports();
+    }
 
     if (m_max_ports == 0)
         rte_exit(EXIT_FAILURE, "Error: Could not find supported ethernet ports. You are probably trying to use unsupported NIC \n");
@@ -4587,6 +4659,11 @@ int  CGlobalTRex::ixgbe_prob_init(void){
         m_port_cfg.update_global_config_fdir();
     }
 
+    if ( ps->preview.getCores() ==0 ) {
+        printf("Error: the number of cores can't be set to 0. Please use -c 1 \n \n");
+        exit(1);
+    }
+
     if (CGlobalInfo::get_queues_mode() == CGlobalInfo::Q_MODE_ONE_QUEUE) {
         /* verify that we have only one thread/core per dual- interface */
         if ( ps->preview.getCores()>1 ) {
@@ -4607,6 +4684,12 @@ int  CGlobalTRex::queues_prob_init(){
 
     if (m_max_cores < 2) {
         rte_exit(EXIT_FAILURE, "number of cores should be at least 2 \n");
+    }
+    if ( (m_max_ports>>1) > get_cores_tx() ) {
+        rte_exit(EXIT_FAILURE, "You don't have enough physical cores for this configuration dual_ports:%lu physical_cores:%lu dp_cores:%lu check lscpu \n",
+                 (ulong)(m_max_ports>>1),
+                 (ulong)m_max_cores,
+                 (ulong)get_cores_tx());
     }
 
     assert((m_max_ports>>1) <= get_cores_tx() );
@@ -5760,6 +5843,8 @@ int CGlobalTRex::start_master_statefull() {
     m_fl.load_from_yaml(CGlobalInfo::m_options.cfg_file,get_cores_tx());
     if ( CGlobalInfo::m_options.m_active_flows>0 ) {
         m_fl.update_active_flows(CGlobalInfo::m_options.m_active_flows);
+    } else if ( CGlobalInfo::m_options.m_is_lowend ) {
+        m_fl.update_active_flows(LOWEND_LIMIT_ACTIVEFLOWS);
     }
     /* client config */
     if (CGlobalInfo::m_options.client_cfg_file != "") {
@@ -6230,6 +6315,15 @@ int update_global_info_from_platform_file(){
 
     CGlobalInfo::m_options.prefix =cg->m_prefix;
     CGlobalInfo::m_options.preview.setCores(cg->m_thread_per_dual_if);
+    if ( cg->m_is_lowend ) {
+        CGlobalInfo::m_options.m_is_lowend = true;
+        CGlobalInfo::m_options.m_is_sleepy_scheduler = true;
+        CGlobalInfo::m_options.m_is_queuefull_retry = false;
+    }
+    #ifdef TREX_PERF
+    CGlobalInfo::m_options.m_is_sleepy_scheduler = true;
+    CGlobalInfo::m_options.m_is_queuefull_retry = false;
+    #endif
 
     if ( cg->m_port_limit_exist ){
         if (cg->m_port_limit > cg->m_if_list.size() ) {
@@ -6279,15 +6373,20 @@ int update_global_info_from_platform_file(){
         }
     }
 
+    return (0);
+}
+
+void update_memory_cfg() {
+    CPlatformYamlInfo *cg=&global_platform_cfg_info;
+
     /* mul by interface type */
     float mul=1.0;
-    if (cg->m_port_bandwidth_gb<10) {
+    if (cg->m_port_bandwidth_gb<10 || CGlobalInfo::m_options.m_is_lowend) {
         cg->m_port_bandwidth_gb=10.0;
     }
 
     mul = mul*(float)cg->m_port_bandwidth_gb/10.0;
-    mul= mul * (float)cg->m_port_limit/2.0;
-
+    mul= mul * (float)CGlobalInfo::m_options.m_expected_portd/2.0;
     mul= mul * CGlobalInfo::m_options.m_mbuf_factor;
 
 
@@ -6297,7 +6396,56 @@ int update_global_info_from_platform_file(){
                                                     CGlobalInfo::m_options.get_number_of_dp_cores_needed() );
 
     CGlobalInfo::m_memory_cfg.set(cg->m_memory,mul);
-    return (0);
+    if ( CGlobalInfo::m_options.m_active_flows > CGlobalInfo::m_memory_cfg.m_mbuf[MBUF_DP_FLOWS] ) {
+        printf("\n");
+        printf("ERROR: current configuration has %u flow objects, and you are asking for %u active flows.\n",
+                CGlobalInfo::m_memory_cfg.m_mbuf[MBUF_DP_FLOWS], CGlobalInfo::m_options.m_active_flows);
+        printf("Either decrease active flows, or increase memory pool.\n");
+        printf("For example put in platform config file:\n");
+        printf("\n");
+        printf(" memory:\n");
+        printf("     dp_flows: %u\n", CGlobalInfo::m_options.m_active_flows);
+        printf("\n");
+        exit(1);
+    }
+}
+
+void check_pdev_vdev() {
+    bool found_vdev = false;
+    bool found_pdev = false;
+    uint32_t dev_id = 1e6;
+    for ( std::string &iface : global_platform_cfg_info.m_if_list ) {
+        if ( iface.find("--vdev") != std::string::npos ) {
+            found_vdev = true;
+        } else if ( iface.find(":") == std::string::npos ) { // not PCI, assume af-packet
+            iface = "--vdev=net_af_packet" + std::to_string(dev_id) + ",iface=" + iface;
+            if ( getpagesize() == 4096 ) {
+                // block size should be multiplication of PAGE_SIZE and frame size
+                // frame size should be Jumbo packet size and multiplication of 16
+                iface += ",blocksz=593920,framesz=9280,framecnt=256";
+            } else {
+                printf("WARNING:\n");
+                printf("    Could not automatically set AF_PACKET arguments: blocksz, framesz, framecnt.\n");
+                printf("    Will not be able to send Jumbo packets.\n");
+                printf("    See link below for more details (section \"Other constraints\")\n");
+                printf("    https://www.kernel.org/doc/Documentation/networking/packet_mmap.txt\n");
+            }
+            dev_id++;
+            found_vdev = true;
+        } else {
+            found_pdev = true;
+        }
+    }
+    if ( found_vdev ) {
+        if ( found_pdev ) {
+            printf("\n");
+            printf("ERROR: both --vdev and another interface type specified in config file.\n");
+            printf("\n");
+            exit(1);
+        } else {
+            CGlobalInfo::m_options.m_is_vdev = true;
+        }
+    }
 }
 
 extern "C" int eal_cpu_detected(unsigned lcore_id);
@@ -6360,6 +6508,11 @@ int  update_dpdk_args(void){
 
     CPlatformSocketInfo * lpsock=&CGlobalInfo::m_socket;
     CParserOption * lpop= &CGlobalInfo::m_options;
+    CPlatformYamlInfo *cg=&global_platform_cfg_info;
+
+    if ( cg->m_if_list.size() > CGlobalInfo::m_options.m_expected_portd ) {
+        cg->m_if_list.resize(CGlobalInfo::m_options.m_expected_portd);
+    }
 
     lpsock->set_rx_thread_is_enabled(get_is_rx_thread_enabled());
     lpsock->set_number_of_threads_per_ports(lpop->preview.getCores() );
@@ -6373,15 +6526,9 @@ int  update_dpdk_args(void){
         lpsock->dump(stdout);
     }
 
-    snprintf(g_cores_str, sizeof(g_cores_str), "0x%llx" ,(unsigned long long)lpsock->get_cores_mask());
-    if (core_mask_sanity(strtol(g_cores_str, NULL, 16)) < 0) {
-        return -1;
-    }
-
-
-    if ( lpop->m_op_mode != CParserOption::OP_MODE_DUMP_INTERFACES ){
+    if ( !CGlobalInfo::m_options.m_is_vdev && (lpop->m_op_mode != CParserOption::OP_MODE_DUMP_INTERFACES) ){
         std::string err;
-        if ( port_map.set_cfg_input(global_platform_cfg_info.m_if_list,err)!= 0){
+        if ( port_map.set_cfg_input(cg->m_if_list,err)!= 0){
             printf("%s \n",err.c_str());
             return(-1);
         }
@@ -6412,8 +6559,21 @@ int  update_dpdk_args(void){
         SET_ARGS(g_mlx4_so_id_str);
     }
 
-    SET_ARGS("-c");
-    SET_ARGS(g_cores_str);
+    if ( CGlobalInfo::m_options.m_is_lowend ) { // assign all threads to core 0
+        g_cores_str[0] = '(';
+        lpsock->get_cores_list(g_cores_str + 1);
+        strcat(g_cores_str, ")@0");
+        SET_ARGS("--lcores");
+        SET_ARGS(g_cores_str);
+    } else {
+        snprintf(g_cores_str, sizeof(g_cores_str), "0x%llx" ,(unsigned long long)lpsock->get_cores_mask());
+        if (core_mask_sanity(strtol(g_cores_str, NULL, 16)) < 0) {
+            return -1;
+        }
+        SET_ARGS("-c");
+        SET_ARGS(g_cores_str);
+    }
+
     SET_ARGS("-n");
     SET_ARGS("4");
 
@@ -6438,8 +6598,24 @@ int  update_dpdk_args(void){
             SET_ARGS("-w");
             SET_ARGS(lpop->dump_interfaces[i].c_str());
         }
-    }
-    else {
+
+    } else if ( CGlobalInfo::m_options.m_is_vdev ) {
+        for ( std::string &iface : cg->m_if_list ) {
+            SET_ARGS(iface.c_str());
+        }
+        SET_ARGS("--no-pci");
+        SET_ARGS("--no-huge");
+        std::string mem_str;
+        SET_ARGS("-m");
+        if ( cg->m_limit_memory.size() ) {
+            mem_str = cg->m_limit_memory;
+        } else if ( CGlobalInfo::m_options.m_is_lowend ) {
+            mem_str = std::to_string(50 + 100 * cg->m_if_list.size());
+        } else {
+            mem_str = "1024";
+        }
+        SET_ARGS(mem_str.c_str());
+    } else {
         dpdk_input_args_t & dif = *port_map.get_dpdk_input_args();
 
         for (int i=0; i<(int)dif.size(); i++) {
@@ -6450,32 +6626,29 @@ int  update_dpdk_args(void){
 
 
 
-    if ( lpop->prefix.length()  ){
+    if ( lpop->prefix.length() && !CGlobalInfo::m_options.m_is_lowend && !CGlobalInfo::m_options.m_is_vdev ) {
         SET_ARGS("--file-prefix");
         snprintf(g_prefix_str, sizeof(g_prefix_str), "%s", lpop->prefix.c_str());
         SET_ARGS(g_prefix_str);
 
         SET_ARGS("--socket-mem");
         char *mem_str;
-        if (global_platform_cfg_info.m_limit_memory.length()) {
-            mem_str = (char *)global_platform_cfg_info.m_limit_memory.c_str();
+        if (cg->m_limit_memory.length()) {
+            mem_str = (char *)cg->m_limit_memory.c_str();
         }else{
             mem_str = (char *)"1024";
-            SET_ARGS("1024");
         }
-        int pos = 0;
-        pos = snprintf(g_socket_mem_str, sizeof(g_socket_mem_str), "%s", mem_str);
-        int socket;
-     	for (socket = 1; socket < 8; socket++) {
- 	    char path[PATH_MAX];
-   		snprintf(path, sizeof(path), "/sys/devices/system/node/node%u/", socket);
- 	    if (access(path, F_OK) == 0) {
-               pos += snprintf(g_socket_mem_str+pos, sizeof(g_socket_mem_str)-pos, ",%s", mem_str);
-           } else {
-               break;
-           }
-       }
-       SET_ARGS(g_socket_mem_str);
+        int pos = snprintf(g_socket_mem_str, sizeof(g_socket_mem_str), "%s", mem_str);
+        for (int socket = 1; socket < MAX_SOCKETS_SUPPORTED; socket++) {
+            char path[PATH_MAX];
+            snprintf(path, sizeof(path), "/sys/devices/system/node/node%u/", socket);
+            if (access(path, F_OK) == 0) {
+                pos += snprintf(g_socket_mem_str+pos, sizeof(g_socket_mem_str)-pos, ",%s", mem_str);
+            } else {
+                break;
+            }
+        }
+        SET_ARGS(g_socket_mem_str);
     }
 
 
@@ -6531,12 +6704,15 @@ void dump_interfaces_info() {
     for (uint8_t port_id=0; port_id<m_max_ports; port_id++) {
         // PCI, MAC and Driver
         rte_eth_dev_info_get(port_id, &dev_info);
-        pci_addr = &(dev_info.pci_dev->addr);
         rte_eth_macaddr_get(port_id, &mac_addr);
         ether_format_addr(mac_str, sizeof mac_str, &mac_addr);
-        printf("PCI: %04x:%02x:%02x.%d - MAC: %s - Driver: %s\n",
-            pci_addr->domain, pci_addr->bus, pci_addr->devid, pci_addr->function, mac_str,
-            dev_info.driver_name); 
+        if ( dev_info.pci_dev ) {
+            pci_addr = &(dev_info.pci_dev->addr);
+            printf("PCI: %04x:%02x:%02x.%d", pci_addr->domain, pci_addr->bus, pci_addr->devid, pci_addr->function);
+        } else {
+            printf("PCI: N/A");
+        }
+        printf(" - MAC: %s - Driver: %s\n", mac_str, dev_info.driver_name);
     }
 }
 
@@ -6592,12 +6768,14 @@ int main_test(int argc , char * argv[]){
         exit(-1);
     }
 
+    update_memory_cfg();
 
     if ( CGlobalInfo::m_options.preview.getVMode() > 0){
         CGlobalInfo::m_options.dump(stdout);
         CGlobalInfo::m_memory_cfg.Dump(stdout);
     }
 
+    check_pdev_vdev();
 
     if (update_dpdk_args() < 0) {
         return -1;
@@ -6670,12 +6848,14 @@ int main_test(int argc , char * argv[]){
         printf(" You might need to run ./trex-cfg  once  \n");
         rte_exit(EXIT_FAILURE, "Invalid EAL arguments\n");
     }
-    set_driver();
     if (CGlobalInfo::m_options.m_op_mode == CParserOption::OP_MODE_DUMP_INTERFACES) {
         dump_interfaces_info();
         exit(0);
     }
-    reorder_dpdk_ports();
+    set_driver();
+    if ( !CGlobalInfo::m_options.m_is_vdev ) {
+        reorder_dpdk_ports();
+    }
     time_init();
 
     /* check if we are in simulation mode */
@@ -6825,8 +7005,8 @@ void wait_x_sec(int sec) {
 /* should be called after rte_eal_init() */
 void set_driver() {
     uint8_t m_max_ports = rte_eth_dev_count();
-    if ( !m_max_ports ) {
-        printf("Could not find interfaces.\n");
+    if ( m_max_ports != CGlobalInfo::m_options.m_expected_portd ) {
+        printf("Could not find all interfaces (asked for: %u, found: %u).\n", CGlobalInfo::m_options.m_expected_portd, m_max_ports);
         exit(1);
     }
     struct rte_eth_dev_info dev_info;
@@ -8349,6 +8529,10 @@ bool CTRexExtendedDriverVmxnet3::get_extended_stats(CPhyEthIF * _if,CPhyEthIFSta
     return get_extended_stats_fixed(_if, stats, 4, 4);
 }
 
+bool CTRexExtendedDriverAfPacket::get_extended_stats(CPhyEthIF * _if, CPhyEthIFStats *stats) {
+    return get_extended_stats_fixed(_if, stats, 4, 4);
+}
+
 bool CTRexExtendedDriverBaseE1000::get_extended_stats(CPhyEthIF * _if,CPhyEthIFStats *stats){
     return get_extended_stats_fixed(_if, stats, 0, 4);
 }
@@ -8372,6 +8556,11 @@ void CTRexExtendedDriverVmxnet3::update_configuration(port_cfg_t * cfg){
     if ( get_is_tcp_mode() ) {
        cfg->m_port_conf.rxmode.enable_lro = 1;
     }
+}
+
+void CTRexExtendedDriverAfPacket::update_configuration(port_cfg_t * cfg){
+    CTRexExtendedDriverVirtBase::update_configuration(cfg);
+    cfg->m_port_conf.rxmode.max_rx_pkt_len = 1514;
 }
 
 ///////////////////////////////////////////////////////// VF
@@ -8520,13 +8709,17 @@ TrexDpdkPlatformApi::get_port_info(uint8_t port_id, intf_info_st &info) const {
 
     memcpy(info.hw_macaddr, rte_mac_addr.addr_bytes, 6);
 
-    info.numa_node =  g_trex.m_ports[port_id].m_dev_info.pci_dev->device.numa_node;
-    struct rte_pci_addr *loc = &g_trex.m_ports[port_id].m_dev_info.pci_dev->addr;
+    if ( CGlobalInfo::m_options.m_is_vdev ) {
+        info.numa_node = -1;
+        info.pci_addr = "N/A";
+    } else {
+        info.numa_node =  g_trex.m_ports[port_id].m_dev_info.pci_dev->device.numa_node;
+        struct rte_pci_addr *loc = &g_trex.m_ports[port_id].m_dev_info.pci_dev->addr;
 
-    char pci_addr[50];
-    snprintf(pci_addr, sizeof(pci_addr), PCI_PRI_FMT, loc->domain, loc->bus, loc->devid, loc->function);
-    info.pci_addr = pci_addr;
-
+        char pci_addr[50];
+        snprintf(pci_addr, sizeof(pci_addr), PCI_PRI_FMT, loc->domain, loc->bus, loc->devid, loc->function);
+        info.pci_addr = pci_addr;
+    }
 }
 
 void

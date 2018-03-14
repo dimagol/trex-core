@@ -64,7 +64,15 @@ limitations under the License.
 #define TW_LEVELS        (CGlobalInfo::m_options.get_tw_levels())
 #define BUCKET_TIME_SEC (CGlobalInfo::m_options.get_tw_bucket_time_in_sec())
 #define BUCKET_TIME_SEC_LEVEL1 (CGlobalInfo::m_options.get_tw_bucket_level1_time_in_sec())
+#define TCP_RX_FLUSH_ACCURATE_SEC  (2.0/1000000.0)
 #define TCP_RX_FLUSH_SEC  (20.0/1000000.0)
+
+#define LOWEND_LIMIT_FLOWNODES (1 << 16)
+#define LOWEND_LIMIT_ACTIVEFLOWS (LOWEND_LIMIT_FLOWNODES / 2)
+#define LOWEND_SHORT_SLEEP_SEC (100.0 / 1e6)
+#define LOWEND_LONG_SLEEP_SEC (1.0 / 1e3)
+#define LOWEND_MEMPOOL_LIMIT_MB (20 * 1e6)
+
 
 class CGenNode;
 
@@ -386,7 +394,31 @@ public:
     bool get_is_termio_disabled() {
         return (btGetMaskBit32(m_flags1, 18, 18) ? true : false);
     }
-    
+
+    void setLroOffloadDisable(bool enable){
+        btSetMaskBit32(m_flags1, 19, 19, (enable ? 1 : 0) );
+    }
+
+    bool getLroOffloadDisable() {
+        return (btGetMaskBit32(m_flags1, 19, 19) ? true : false);
+    }
+
+    void setPromMode(bool enable){
+        btSetMaskBit32(m_flags1, 20, 20, (enable ? 1 : 0) );
+    }
+
+    bool getPromMode() {
+        return (btGetMaskBit32(m_flags1, 20, 20) ? true : false);
+    }
+
+    void setEmulDebug(bool enable){
+        btSetMaskBit32(m_flags1, 21, 21, (enable ? 1 : 0) );
+    }
+
+    bool getEmulDebug() {
+        return (btGetMaskBit32(m_flags1, 21, 21) ? true : false);
+    }
+
 public:
     void Dump(FILE *fd);
 
@@ -520,6 +552,10 @@ public:
         x710_fdir_reset_threshold = 0xffffffff - 1000000000/8/64*40;
         m_astf_mode =OP_ASTF_MODE_NONE;
         m_astf_client_mask=0;
+        m_is_lowend           = false;
+        m_is_sleepy_scheduler = false;
+        m_is_queuefull_retry  = true;
+        m_is_vdev             = false;
     }
 
     CParserOption(){
@@ -556,7 +592,11 @@ public:
     bool            m_rx_thread_enabled;
     trex_op_mode_e  m_op_mode;
     trex_astf_mode_e m_astf_mode;
-    uint32_t         m_astf_client_mask;
+    uint32_t        m_astf_client_mask;
+    bool            m_is_lowend;
+    bool            m_is_sleepy_scheduler;   // sleep or busy wait on scheduler
+    bool            m_is_queuefull_retry;    // retry on queue full
+    bool            m_is_vdev;
 
     
     std::string        cfg_file;
@@ -636,8 +676,6 @@ public:
     inline uint16_t get_tw_levels(void){
         return (m_tw_levels);
     }
-
-
 
     inline void set_rxcheck_const_ts(){
         m_run_flags |= RUN_FLAGS_RXCHECK_CONST_TS;
@@ -800,7 +838,7 @@ public:
     } queues_mode;
 
 
-    static void init_pools(uint32_t rx_buffers, uint32_t rx_pool);
+    static void init_pools(uint32_t rx_buffers, uint32_t rx_pool, bool is_hugepages = true);
     /* for simulation */
     static void free_pools();
 
@@ -958,6 +996,5 @@ static inline bool get_is_rx_filter_enable(){
 static inline uint16_t get_rx_check_hops() {
     return (CGlobalInfo::m_options.m_rx_check_hops);
 }
-
 
 #endif

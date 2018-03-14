@@ -29,7 +29,6 @@ limitations under the License.
 #include <stdio.h>
 #include <stdlib.h>
 #include <ctype.h>
-#include "sanb_atomic.h"
 
 void rte_pktmbuf_detach(struct rte_mbuf *m);
 
@@ -38,7 +37,8 @@ rte_mempool_t * utl_rte_mempool_create_non_pkt(const char  *name,
                                                unsigned elt_size,
                                                unsigned cache_size,
                                                int socket_id,
-                                               bool share){
+                                               bool share,
+                                               bool is_hugepages){
     rte_mempool_t * p=new rte_mempool_t();
     assert(p);
     p->elt_size =elt_size;
@@ -53,8 +53,8 @@ rte_mempool_t * utl_rte_mempool_create(const char  *name,
                                       unsigned n,
                                       unsigned elt_size,
                                       unsigned cache_size,
-                                      int socket_id
-                                       ){
+                                      int socket_id,
+                                      bool is_hugepages){
 
     rte_mempool_t * p=new rte_mempool_t();
     assert(p);

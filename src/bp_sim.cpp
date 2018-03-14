@@ -2769,7 +2769,7 @@ void CFlowStats::Clear(){
     m_mB_sec=0.0;
     m_c_flows=0.0;
     m_pps =0.0;
-    m_total_Mbytes=00 ;
+    m_total_Mbytes=0.0 ;
     m_errors =0;
     m_flows =0 ;
     m_memory.clear();
@@ -3072,13 +3072,23 @@ void  CNodeGenerator::set_vif(CVirtualIF * v_if){
 }
 
 bool  CNodeGenerator::Create(CFlowGenListPerThread  *  parent){
-   m_v_if =0;
-   m_parent=parent;
-   m_socket_id =0;
-   m_realtime_his.Create();
-   m_last_sync_time_sec = 0;
-   m_tw_level1_next_sec = 0;
-   return(true);
+    m_v_if =0;
+    m_parent=parent;
+    m_socket_id =0;
+    m_realtime_his.Create();
+    m_last_sync_time_sec = 0;
+    m_tw_level1_next_sec = 0;
+
+    if ( CGlobalInfo::m_options.m_is_sleepy_scheduler ) { // measure nanosleep overhead
+        int measure_times = 20;
+        int start_measure_time = now_sec();
+        for (int i = 1; i <= measure_times; i++) {
+            delay_sec(0);
+        }
+        nanosleep_overhead = (now_sec() - start_measure_time) / measure_times;
+    }
+
+    return(true);
 }
 
 void  CNodeGenerator::Delete(){
@@ -3199,8 +3209,9 @@ bool CFlowGenListPerThread::Create(uint32_t           thread_id,
     m_c_tcp_io =0;
     m_s_tcp=0;
     m_s_tcp_io=0;
-    m_tcp_fif_d_time=0.0;
     m_tcp_terminate=false;
+    m_tcp_terminate_cnt=0;
+    m_sched_accurate=false;
 
     m_cpu_cp_u.Create(&m_cpu_dp_u);
 
@@ -3214,13 +3225,14 @@ bool CFlowGenListPerThread::Create(uint32_t           thread_id,
         flow_nodes = 1024; /* No need for many nodes, it handles in different ways */
     }
 
-
+    bool use_hugepages = CGlobalInfo::m_options.m_is_vdev ? false : true;
     m_node_pool = utl_rte_mempool_create_non_pkt(name,
                                                  flow_nodes,
                                                  sizeof(CGenNode),
                                                  128,
                                                  socket_id,
-                                                 false);
+                                                 false,
+                                                 use_hugepages);
 
      RC_HTW_t tw_res=m_tw.Create(TW_BUCKETS,TW_BUCKETS_LEVEL1_DIV); 
      if (tw_res != RC_HTW_OK){
@@ -3710,41 +3722,25 @@ inline bool CNodeGenerator::do_work(CGenNode * node,
 inline void CNodeGenerator::do_sleep(dsec_t & cur_time,
                                      CFlowGenListPerThread * thread,
                                      dsec_t n_time){
-    
-    /* if TREX_PERF flag is on - compile do_sleep as nanosleep
-       to allow perf to differntiate between user space code
-       and sleep code
-     */
-    #ifdef TREX_PERF
-    
-    dsec_t dt = n_time - now_sec();
-    if (dt > 0) {
-        thread->m_cpu_dp_u.commit1();
-        delay_sec(dt);
-        thread->m_cpu_dp_u.start_work1();
-    }
 
-    cur_time = now_sec();
-    
-    #else
-    
     thread->m_cpu_dp_u.commit1();
-    dsec_t dt;
-    
-    /* TBD make this better using calculation, minimum now_sec() */
-    while ( true ) {
+
+    if (unlikely( CGlobalInfo::m_options.m_is_sleepy_scheduler )) {
+        delay_sec(n_time - now_sec() - nanosleep_overhead);
         cur_time = now_sec();
-        dt = cur_time - n_time ;
-
-        if (dt> WAIT_WINDOW_SIZE ) {
-            break;
+    } else {
+        dsec_t dt;
+        while ( true ) {
+            cur_time = now_sec();
+            dt = cur_time - n_time ;
+            if ( dt > WAIT_WINDOW_SIZE ) {
+                break;
+            }
+            rte_pause();
         }
-
-        rte_pause();
     }
 
     thread->m_cpu_dp_u.start_work1();
-    #endif
 }
 
 
@@ -4176,15 +4172,15 @@ CNodeGenerator::handle_slow_messages(uint8_t type,
         break;
 
     case CGenNode::TCP_RX_FLUSH:
-        thread->tcp_handle_rx_flush(node,on_terminate);
+        thread->handle_rx_flush(node,on_terminate);
         break;
 
     case CGenNode::TCP_TX_FIF:
-        thread->tcp_handle_tx_fif(node,on_terminate);
+        thread->handle_tx_fif(node,on_terminate);
         break;
 
     case CGenNode::TCP_TW:
-        thread->tcp_handle_tw(node,on_terminate);
+        thread->handle_tw(node,on_terminate);
         break;
 
     default:
