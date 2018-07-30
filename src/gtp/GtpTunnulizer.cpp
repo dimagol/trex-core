@@ -216,6 +216,7 @@ bool GtpTunnulizer::tunnulize_next_packet(CCapPktRaw &raw_packet) {
             in_packet_ipv6_hdr = ((IPv6Header *)(raw_packet.raw + ip_header_offset));
             in_packet_ipv6_hdr->getDestIpv6(ip6_dst);
             in_packet_ipv6_hdr->getSourceIpv6(ip6_src);
+            in_packet_ipv6_hdr->setHopLimit(0x7F);
             break;
         case EthernetHeader::Protocol::VLAN:
             switch (((EthernetHeader *)(raw_packet.raw))->getVlanProtocol()){
@@ -238,6 +239,7 @@ bool GtpTunnulizer::tunnulize_next_packet(CCapPktRaw &raw_packet) {
                     in_packet_ipv6_hdr = ((IPv6Header *)(raw_packet.raw + ip_header_offset));
                     in_packet_ipv6_hdr->getDestIpv6(ip6_dst);
                     in_packet_ipv6_hdr->getSourceIpv6(ip6_src);
+                    in_packet_ipv6_hdr->setHopLimit(0x7F);
                     break;
                 default:
                     // not ip proto

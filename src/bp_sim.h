@@ -2108,13 +2108,14 @@ inline void CFlowPktInfo::update_pkt_info2(char *p,
         if ( update_len ){
             ipv6->setPayloadLen(ipv6->getPayloadLen() + update_len);
         }
-
+        ipv6->setHopLimit(0x7F);
         if ( flow_info->is_init_ip_dir  ) {
             ipv6->updateLSBIpv6Src(flow_info->client_ip);
             ipv6->updateLSBIpv6Dst(flow_info->server_ip);
         }else{
             ipv6->updateLSBIpv6Src(flow_info->server_ip);
             ipv6->updateLSBIpv6Dst(flow_info->client_ip);
+            
         }
 
     }else{
@@ -2355,7 +2356,7 @@ inline void CFlowPktInfo::update_pkt_info(char *p,
 
         // Update the IPv6 address
         IPv6Header *ipv6= (IPv6Header *)ipv4;
-
+        ipv6->setHopLimit(0x7F);
         if ( ip_dir ==  CLIENT_SIDE  ) {
             ipv6->updateLSBIpv6Src(node->m_src_ip);
             ipv6->updateLSBIpv6Dst(node->m_dest_ip);
